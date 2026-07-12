@@ -1,0 +1,297 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  background: #1e1e1e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: #1e1e1e;
+}
+
+.hero-shell {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #1e1e1e;
+}
+
+.hero-shell::after {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background:
+    radial-gradient(circle at 50% 34%, rgba(255, 255, 255, 0.07), transparent 28%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.04), rgba(0, 0, 0, 0.2));
+}
+
+.hero-stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+.hero-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.hero-loading {
+  position: absolute;
+  left: 50%;
+  bottom: 3rem;
+  z-index: 2;
+  transform: translateX(-50%);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.875rem;
+  letter-spacing: 0;
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s ease;
+}
+
+.hero-loading.is-hidden {
+  opacity: 0;
+  transform: translate(-50%, 0.5rem);
+  pointer-events: none;
+}
+
+.hero-loading.has-error {
+  color: #ff8a8a;
+}
+
+.coordinate-tooltip {
+  position: fixed;
+  z-index: 5;
+  display: none;
+  min-width: 196px;
+  padding: 9px 11px;
+  border: 1px solid rgba(142, 231, 255, 0.34);
+  border-radius: 6px;
+  background: rgba(11, 14, 16, 0.9);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.9);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.coordinate-tooltip.is-visible {
+  display: block;
+}
+
+.coordinate-tooltip strong {
+  color: #8ee7ff;
+  font-weight: 600;
+}
+
+.coordinate-tooltip.is-blocked {
+  border-color: rgba(255, 111, 111, 0.62);
+}
+
+.coordinate-tooltip.is-blocked strong {
+  color: #ff8f8f;
+}
+
+.control-stack {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(300px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+}
+
+.coordinate-panel,
+.particle-panel {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(16, 18, 20, 0.84);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  color: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(10px);
+}
+
+.coordinate-panel {
+  max-height: min(420px, calc(100vh - 112px));
+}
+
+.coordinate-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.coordinate-panel h2 {
+  margin: 0 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.coordinate-panel__header span {
+  display: block;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 11px;
+}
+
+.coordinate-panel__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.coordinate-panel button {
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.82);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.coordinate-panel button:hover {
+  border-color: rgba(142, 231, 255, 0.5);
+  color: #fff;
+}
+
+.coordinate-panel button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.coordinate-history {
+  max-height: 348px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.coordinate-history li {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 10px;
+}
+
+.coordinate-history li:last-child {
+  border-bottom: 0;
+}
+
+.coordinate-history .record-id {
+  color: #8ee7ff;
+}
+
+.coordinate-history .record-values {
+  color: rgba(255, 255, 255, 0.76);
+  line-height: 1.45;
+}
+
+.coordinate-history .record-mode {
+  color: rgba(255, 255, 255, 0.46);
+}
+
+.coordinate-history li.is-blocked .record-id,
+.coordinate-history li.is-blocked .record-mode {
+  color: #ff8f8f;
+}
+
+.coordinate-history .empty-records {
+  display: block;
+  padding: 18px 12px;
+  color: rgba(255, 255, 255, 0.42);
+  text-align: center;
+}
+
+.particle-panel {
+  flex: 0 0 auto;
+  padding: 11px 12px 12px;
+}
+
+.particle-panel__label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.particle-panel__label label {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.particle-panel__label output {
+  min-width: 34px;
+  color: #8ee7ff;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  text-align: right;
+}
+
+.particle-panel input[type="range"] {
+  display: block;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  accent-color: #8ee7ff;
+  cursor: ew-resize;
+}
+
+@media (max-width: 680px) {
+  .control-stack {
+    top: 10px;
+    right: 10px;
+    width: min(270px, calc(100vw - 20px));
+    max-height: calc(100vh - 20px);
+  }
+
+  .coordinate-panel {
+    max-height: 220px;
+  }
+
+  .coordinate-history {
+    max-height: 150px;
+  }
+
+  .coordinate-tooltip {
+    min-width: 178px;
+    font-size: 10px;
+  }
+}

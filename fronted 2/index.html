@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Computer Screen Recreation</title>
+  <link rel="stylesheet" href="./styles.css?v=ticker-2">
+</head>
+<body>
+  <main class="stage" aria-label="Shopify Live Globe inspired computer screen">
+    <section class="monitor">
+      <div class="monitor-screen">
+        <header class="os-bar">
+          <div class="os-left" aria-hidden="true"></div>
+          <div class="os-right">
+            <div class="ticker" aria-label="system broadcast">
+              <span class="ticker-track">我是你爹</span>
+            </div>
+          </div>
+        </header>
+
+        <div class="desktop">
+          <aside class="desktop-icons" aria-label="desktop files">
+            <button class="desktop-icon folder">
+              <span class="folder-art"></span>
+              <span>幕后花絮</span>
+            </button>
+            <button class="desktop-icon folder">
+              <span class="folder-art"></span>
+              <span>维加斯球体</span>
+            </button>
+            <button class="desktop-icon car">
+              <span class="car-art"></span>
+              <span>驾驶</span>
+            </button>
+            <button class="desktop-icon document active">
+              <span class="doc-art"></span>
+              <span>careers.txt</span>
+            </button>
+          </aside>
+
+          <section class="file-window" aria-label="media folder">
+            <div class="window-bar">
+              <strong>/usr/shop/vegas-sphere</strong>
+              <div class="window-actions">
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+            <div class="file-grid">
+              <article class="file-tile video city">
+                <span class="thumb"></span>
+                <strong>globe_2024.mp4</strong>
+              </article>
+              <article class="file-tile video portrait">
+                <span class="thumb"></span>
+                <strong>globe_2025.mp4</strong>
+              </article>
+              <article class="file-tile audio">
+                <span class="audio-icon"></span>
+                <strong>wow its really<br>live.mp3</strong>
+              </article>
+              <article class="file-tile video sphere">
+                <span class="thumb"></span>
+                <strong>若色器.mp4</strong>
+              </article>
+              <article class="file-tile readme">
+                <span class="small-doc"></span>
+                <strong>README.md</strong>
+              </article>
+            </div>
+          </section>
+
+          <section class="widgets" aria-label="data widgets">
+            <article class="panel radar">
+              <h2>边缘</h2>
+              <div class="radar-visual">
+                <span class="arc arc-1"></span>
+                <span class="arc arc-2"></span>
+                <span class="arc arc-3"></span>
+                <span class="arc arc-4"></span>
+                <span class="beam"></span>
+                <span class="center-dot"></span>
+              </div>
+              <p class="metric">463,667,946</p>
+              <span class="caption">每分钟边缘请求数</span>
+              <p class="metric small">88,980</p>
+              <span class="caption">EDGE 流量（千兆字节/分钟）</span>
+            </article>
+
+            <article class="panel grid-panel">
+              <h2>后端</h2>
+              <div class="status-grid">
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+              <p class="metric">9,867,452</p>
+              <span class="caption">SHOPIFY 功能/分钟</span>
+              <p class="metric small">2,922,907,495</p>
+              <span class="caption">每分钟数据库查询次数</span>
+            </article>
+
+            <article class="panel flow">
+              <h2>其他东西</h2>
+              <div class="flow-lines">
+                <span></span><span></span><span></span><span></span><span></span>
+                <i></i><i></i><i></i>
+              </div>
+              <p class="metric">168,257,324</p>
+              <span class="caption">每分钟 CDN 请求数</span>
+              <p class="metric small">28,076,117</p>
+              <span class="caption">每分钟 WEBHOOKS</span>
+            </article>
+
+            <article class="panel logs">
+              <h2>日志和数据</h2>
+              <div class="bars">
+                <span></span><span></span><span></span><span></span><span></span>
+              </div>
+              <p class="metric">10,123,623</p>
+              <span class="caption">日志兆字节/分钟</span>
+              <p class="metric small">28,307,176</p>
+              <span class="caption">KAFKA 消息/秒</span>
+            </article>
+          </section>
+        </div>
+      </div>
+      <div class="monitor-foot"></div>
+      <div class="monitor-base"></div>
+    </section>
+  </main>
+  <script>
+    const ticker = document.querySelector(".ticker");
+    const tickerTrack = document.querySelector(".ticker-track");
+    let tickerAnimation;
+
+    function startTicker() {
+      if (!ticker || !tickerTrack) return;
+
+      tickerAnimation?.cancel();
+
+      const containerWidth = ticker.clientWidth;
+      const textWidth = tickerTrack.scrollWidth;
+      const speed = 115;
+      const duration = ((containerWidth + textWidth) / speed) * 1000;
+
+      tickerAnimation = tickerTrack.animate(
+        [
+          { transform: `translate(${containerWidth}px, -50%)` },
+          { transform: `translate(${-textWidth}px, -50%)` }
+        ],
+        {
+          duration,
+          iterations: Infinity,
+          easing: "linear"
+        }
+      );
+    }
+
+    const tickerObserver = new ResizeObserver(startTicker);
+    tickerObserver.observe(ticker);
+    startTicker();
+
+    ticker.addEventListener("mouseenter", () => tickerAnimation?.pause());
+    ticker.addEventListener("mouseleave", () => tickerAnimation?.play());
+  </script>
+</body>
+</html>

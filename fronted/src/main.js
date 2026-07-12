@@ -1,0 +1,934 @@
+import './styles.css'
+import * as THREE from 'three'
+import gsap from 'gsap'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
+import { OrbitParticles } from './OrbitParticles.js'
+
+// Shoulder-local unit directions reconstructed from exported records #7-#13.
+const BLOCKED_SPHERICAL_ARC_POINTS = [
+  [0.396010515, -0.918245976, 0],
+  [0.448484916, -0.8937904, 0],
+  [0.477734426, -0.878504308, 0],
+  [0.49913004, -0.866527093, 0],
+  [0.527708, -0.842421, 0.108862875],
+  [0.527717, -0.783405, 0.328315967],
+  [0.541135, -0.66569, 0.513838239],
+]
+const BLOCKED_ARC_TOLERANCE = THREE.MathUtils.degToRad(2)
+
+class RobotHero {
+  constructor(stage, loading, coordinateUi, particleUi) {
+    this.stage = stage
+    this.loading = loading
+    this.coordinateUi = coordinateUi
+    this.particleUi = particleUi
+    this.scene = null
+    this.camera = null
+    this.renderer = null
+    this.model = null
+    this.head = null
+    this.body = null
+    this.arms = []
+    this.raycaster = new THREE.Raycaster()
+    this.pointer = new THREE.Vector2()
+    this.reachTimeline = null
+    this.targetMarker = null
+    this.orbitParticles = null
+    this.isReaching = false
+    this.frameId = null
+    this.targetRotation = { headX: 0, headY: 0, bodyX: 0, bodyY: 0 }
+    this.lerpFactor = 0.05
+    this.coordinateStorageKey = 'aula-robot-click-records-v1'
+    this.coordinateRecords = this.loadCoordinateRecords()
+    this.clearConfirmationTimer = null
+    this.particleStorageKey = 'aula-particle-size-v1'
+    this.particleSize = this.loadParticleSize()
+
+    this.animate = this.animate.bind(this)
+    this.handleResize = this.handleResize.bind(this)
+    this.handleMouseMove = this.handleMouseMove.bind(this)
+    this.handleSamplingPointerMove = this.handleSamplingPointerMove.bind(this)
+    this.handlePointerDown = this.handlePointerDown.bind(this)
+    this.hideCoordinateTooltip = this.hideCoordinateTooltip.bind(this)
+  }
+
+  async init() {
+    this.scene = new THREE.Scene()
+    this.camera = new THREE.PerspectiveCamera(30, 1, 0.1, 2000)
+    this.camera.position.set(0, 0, 13)
+    this.camera.lookAt(0, 0, 0)
+
+    this.renderer = new THREE.WebGLRenderer({
+      alpha: true,
+      antialias: true,
+      depth: true,
+      premultipliedAlpha: true,
+      preserveDrawingBuffer: true,
+    })
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1
+    this.stage.appendChild(this.renderer.domElement)
+
+    this.handleResize()
+    this.addLights()
+    await Promise.all([this.loadEnvironment(), this.loadRobot()])
+
+    this.hideLoading()
+    this.startIntro()
+    window.addEventListener('resize', this.handleResize)
+    window.addEventListener('mousemove', this.handleMouseMove)
+    this.renderer.domElement.addEventListener('pointermove', this.handleSamplingPointerMove)
+    this.renderer.domElement.addEventListener('pointerdown', this.handlePointerDown)
+    this.renderer.domElement.addEventListener('pointerleave', this.hideCoordinateTooltip)
+    this.setupCoordinateUi()
+    this.setupParticleUi()
+    this.animate()
+  }
+
+  addLights() {
+    const rim = new THREE.DirectionalLight(0xffffff, 1.45)
+    rim.position.set(0, 0.3, 2)
+    this.scene.add(rim)
+
+    const softFill = new THREE.HemisphereLight(0xffffff, 0x111111, 0.35)
+    this.scene.add(softFill)
+  }
+
+  loadEnvironment() {
+    return new Promise((resolve) => {
+      new THREE.TextureLoader().load(
+        '/model/env.jpg',
+        (texture) => {
+          texture.mapping = THREE.EquirectangularReflectionMapping
+          texture.colorSpace = THREE.SRGBColorSpace
+          this.scene.environment = texture
+          resolve()
+        },
+        undefined,
+        () => resolve(),
+      )
+    })
+  }
+
+  loadRobot() {
+    return new Promise((resolve, reject) => {
+      const draco = new DRACOLoader()
+      draco.setDecoderPath('/draco/')
+      draco.setDecoderConfig({ type: 'wasm' })
+      draco.preload()
+
+      const loader = new GLTFLoader()
+      loader.setDRACOLoader(draco)
+      loader.load(
+        '/model/machine-draco.glb',
+        (gltf) => {
+          this.model = gltf.scene
+          this.body = this.findNode(this.model, 'Top_part')
+
+          this.model.traverse((node) => {
+            if (node.name === 'Head') this.head = node
+
+            if (node.name === 'Head_2') {
+              node.material = new THREE.MeshPhysicalMaterial({
+                color: 0x000000,
+                metalness: 1,
+                roughness: 0.04,
+                clearcoat: 1,
+                clearcoatRoughness: 0.04,
+              })
+            }
+
+            if (node.isMesh) {
+              node.frustumCulled = false
+              node.material.needsUpdate = true
+            }
+          })
+
+          this.scene.add(this.model)
+          this.applyResponsiveLayout()
+          this.setupArms()
+          this.createOrbitParticles()
+          this.createTargetMarker()
+          draco.dispose()
+          resolve()
+        },
+        (event) => {
+          if (!event.lengthComputable || !this.loading) return
+          const percent = Math.round((event.loaded / event.total) * 100)
+          this.loading.textContent = `Loading 3D model ${percent}%`
+        },
+        (error) => {
+          draco.dispose()
+          reject(error)
+        },
+      )
+    })
+  }
+
+  startIntro() {
+    const targetZ = this.getTargetCameraZ()
+    this.camera.position.z = targetZ + 3.5
+
+    gsap.fromTo(
+      this.camera.position,
+      { x: 0, y: 0, z: targetZ + 3.5 },
+      {
+        x: 0,
+        y: 0,
+        z: targetZ,
+        duration: 2,
+        ease: 'power3.inOut',
+        delay: 0.5,
+        onUpdate: () => this.camera.updateProjectionMatrix(),
+      },
+    )
+  }
+
+  animate() {
+    this.frameId = requestAnimationFrame(this.animate)
+
+    if (this.head && this.body) {
+      this.head.rotation.x = THREE.MathUtils.lerp(
+        this.head.rotation.x,
+        this.targetRotation.headX,
+        this.lerpFactor,
+      )
+      this.head.rotation.y = THREE.MathUtils.lerp(
+        this.head.rotation.y,
+        this.targetRotation.headY,
+        this.lerpFactor,
+      )
+      if (!this.isReaching) {
+        this.body.rotation.x = THREE.MathUtils.lerp(
+          this.body.rotation.x,
+          this.targetRotation.bodyX,
+          this.lerpFactor,
+        )
+        this.body.rotation.y = THREE.MathUtils.lerp(
+          this.body.rotation.y,
+          this.targetRotation.bodyY,
+          this.lerpFactor,
+        )
+      }
+    }
+
+    if (this.orbitParticles) {
+      this.orbitParticles.update(performance.now() * 0.001)
+    }
+
+    this.renderer.render(this.scene, this.camera)
+  }
+
+  handleResize() {
+    const rect = this.stage.getBoundingClientRect()
+    const width = Math.max(rect.width, 1)
+    const height = Math.max(rect.height, 1)
+
+    this.camera.aspect = width / height
+    this.camera.updateProjectionMatrix()
+    this.renderer.setSize(width, height, false)
+    this.orbitParticles?.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    this.applyResponsiveLayout()
+  }
+
+  getTargetCameraZ() {
+    if (!this.camera) return 9.5
+    if (this.camera.aspect < 0.7) return 12.5
+    if (this.camera.aspect < 1) return 11
+    return 9.5
+  }
+
+  applyResponsiveLayout() {
+    if (!this.camera) return
+
+    const compact = this.camera.aspect < 0.7
+
+    if (this.model) {
+      const scale = compact ? 0.78 : 1.2
+      this.model.scale.set(scale, scale, scale)
+      this.model.position.set(0, compact ? -1.55 : -1.9, 0)
+      this.model.updateMatrixWorld(true)
+    }
+
+  }
+
+  handleMouseMove(event) {
+    const head = this.getMouseDegrees(event.clientX, event.clientY, 30)
+    this.targetRotation.headX = THREE.MathUtils.degToRad(head.y)
+    this.targetRotation.headY = THREE.MathUtils.degToRad(head.x)
+
+    const body = this.getMouseDegrees(event.clientX, event.clientY, 10)
+    this.targetRotation.bodyX = THREE.MathUtils.degToRad(body.y)
+    this.targetRotation.bodyY = THREE.MathUtils.degToRad(body.x)
+  }
+
+  handleSamplingPointerMove(event) {
+    const sample = this.getPointerSample(event.clientX, event.clientY)
+    if (!sample) {
+      this.hideCoordinateTooltip()
+      return
+    }
+
+    this.renderCoordinateTooltip(sample, event.clientX, event.clientY)
+  }
+
+  getPointerSample(clientX, clientY) {
+    if (this.arms.length !== 2 || !this.model) return null
+
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return null
+
+    this.pointer.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    )
+    this.raycaster.setFromCamera(this.pointer, this.camera)
+    this.model.updateMatrixWorld(true)
+
+    const arm = this.selectArmForPointer(this.pointer.x)
+    const orderedArms = this.getScreenOrderedArms()
+    const armNumber = orderedArms.indexOf(arm) + 1
+    const shoulderWorld = arm.shoulder.getWorldPosition(new THREE.Vector3())
+    const frontNormal = this.getFrontNormal(shoulderWorld)
+    const shoulderPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+      frontNormal,
+      shoulderWorld,
+    )
+    const cursorOnPlane = this.raycaster.ray.intersectPlane(
+      shoulderPlane,
+      new THREE.Vector3(),
+    )
+    if (!cursorOnPlane) return null
+
+    const rightAxis = new THREE.Vector3(1, 0, 0).transformDirection(this.body.matrixWorld)
+    const upAxis = new THREE.Vector3(0, 1, 0).transformDirection(this.body.matrixWorld)
+    const planarOffset = cursorOnPlane.clone().sub(shoulderWorld)
+    const u = planarOffset.dot(rightAxis) / arm.reach
+    const v = planarOffset.dot(upAxis) / arm.reach
+    const radius = planarOffset.length() / arm.reach
+    const targetWorld = this.getReachTarget(shoulderWorld, arm.reach)
+    const blockedArc = this.getBlockedSphericalArc({
+      armNumber,
+      shoulderWorld,
+      targetWorld,
+      rightAxis,
+      upAxis,
+      frontAxis: frontNormal,
+    })
+
+    return {
+      arm,
+      armNumber,
+      screen: [Math.round(clientX - rect.left), Math.round(clientY - rect.top)],
+      ndc: [this.pointer.x, this.pointer.y],
+      normalized: [u, v],
+      radius,
+      mode: radius <= 1 ? 'hemisphere' : 'boundary',
+      reach: arm.reach,
+      shoulderWorld,
+      cursorPlaneWorld: cursorOnPlane,
+      targetWorld,
+      blocked: Boolean(blockedArc),
+      blockedArc,
+    }
+  }
+
+  getBlockedSphericalArc({
+    armNumber,
+    shoulderWorld,
+    targetWorld,
+    rightAxis,
+    upAxis,
+    frontAxis,
+  }) {
+    const targetDirection = targetWorld.clone().sub(shoulderWorld).normalize()
+    const horizontalMirror = armNumber === 2 ? -1 : 1
+    const arcDirections = BLOCKED_SPHERICAL_ARC_POINTS.map(([x, y, z]) =>
+      rightAxis
+        .clone()
+        .multiplyScalar(x * horizontalMirror)
+        .addScaledVector(upAxis, y)
+        .addScaledVector(frontAxis, z)
+        .normalize(),
+    )
+
+    for (let index = 0; index < arcDirections.length - 1; index += 1) {
+      const nearestArcDirection = this.getNearestDirectionOnSphericalSegment(
+        targetDirection,
+        arcDirections[index],
+        arcDirections[index + 1],
+      )
+      const angularDistance = Math.acos(
+        THREE.MathUtils.clamp(targetDirection.dot(nearestArcDirection), -1, 1),
+      )
+
+      if (angularDistance <= BLOCKED_ARC_TOLERANCE) {
+        return {
+          id: 1,
+          source: [7, 13],
+          segment: index + 1,
+          distance: THREE.MathUtils.radToDeg(angularDistance),
+        }
+      }
+    }
+
+    return null
+  }
+
+  getNearestDirectionOnSphericalSegment(target, start, end) {
+    const segmentAngle = Math.acos(THREE.MathUtils.clamp(start.dot(end), -1, 1))
+    const normal = new THREE.Vector3().crossVectors(start, end)
+    if (normal.lengthSq() < 1e-10 || segmentAngle < 1e-6) return start
+
+    normal.normalize()
+    const projected = target.clone().addScaledVector(normal, -target.dot(normal))
+    if (projected.lengthSq() < 1e-10) {
+      return target.dot(start) >= target.dot(end) ? start : end
+    }
+
+    projected.normalize()
+    if (projected.dot(target) < 0) projected.negate()
+
+    const startToProjection = Math.acos(
+      THREE.MathUtils.clamp(start.dot(projected), -1, 1),
+    )
+    const projectionToEnd = Math.acos(
+      THREE.MathUtils.clamp(projected.dot(end), -1, 1),
+    )
+    if (startToProjection + projectionToEnd <= segmentAngle + 1e-5) {
+      return projected
+    }
+
+    return target.dot(start) >= target.dot(end) ? start : end
+  }
+
+  setupCoordinateUi() {
+    if (!this.coordinateUi) return
+
+    this.coordinateUi.exportButton.addEventListener('click', () => {
+      this.exportCoordinateRecords()
+    })
+    this.coordinateUi.clearButton.addEventListener('click', () => {
+      if (!this.coordinateRecords.length) return
+      if (this.coordinateUi.clearButton.dataset.confirming !== 'true') {
+        this.coordinateUi.clearButton.dataset.confirming = 'true'
+        this.coordinateUi.clearButton.textContent = '确认清空'
+        window.clearTimeout(this.clearConfirmationTimer)
+        this.clearConfirmationTimer = window.setTimeout(() => {
+          this.resetClearConfirmation()
+        }, 3000)
+        return
+      }
+
+      this.coordinateRecords = []
+      localStorage.removeItem(this.coordinateStorageKey)
+      this.resetClearConfirmation()
+      this.renderCoordinateHistory()
+    })
+    this.renderCoordinateHistory()
+  }
+
+  setupParticleUi() {
+    if (!this.particleUi) return
+
+    const { input, output } = this.particleUi
+    input.value = String(this.particleSize)
+    output.value = this.particleSize.toFixed(1)
+    output.textContent = this.particleSize.toFixed(1)
+    input.addEventListener('input', () => {
+      this.particleSize = Number(input.value)
+      output.value = this.particleSize.toFixed(1)
+      output.textContent = this.particleSize.toFixed(1)
+      this.orbitParticles?.setPointSize(this.particleSize)
+      try {
+        localStorage.setItem(this.particleStorageKey, String(this.particleSize))
+      } catch {
+        // The visual control remains usable when storage is unavailable.
+      }
+    })
+  }
+
+  loadParticleSize() {
+    try {
+      const stored = localStorage.getItem(this.particleStorageKey)
+      if (stored === null) return 10
+
+      const value = Number(stored)
+      return Number.isFinite(value) ? THREE.MathUtils.clamp(value, 4, 22) : 10
+    } catch {
+      return 10
+    }
+  }
+
+  renderCoordinateTooltip(sample, clientX, clientY) {
+    const tooltip = this.coordinateUi?.tooltip
+    if (!tooltip) return
+
+    const [u, v] = sample.normalized
+    const target = sample.targetWorld.toArray().map((value) => value.toFixed(3))
+    const mode = sample.blocked
+      ? `禁用弧 ${sample.blockedArc.id}`
+      : sample.mode === 'hemisphere'
+        ? '半球内'
+        : '圆外截断'
+    tooltip.innerHTML = [
+      `<strong>手臂 ${sample.armNumber}</strong> · ${mode}`,
+      `screen  ${sample.screen[0]}, ${sample.screen[1]}`,
+      `plane   u=${u.toFixed(3)}  v=${v.toFixed(3)}`,
+      `radius  r=${sample.radius.toFixed(3)}`,
+      `target  ${target.join(', ')}`,
+    ].join('<br>')
+    tooltip.classList.toggle('is-blocked', sample.blocked)
+    tooltip.classList.add('is-visible')
+    tooltip.setAttribute('aria-hidden', 'false')
+
+    const bounds = tooltip.getBoundingClientRect()
+    let left = clientX + 14
+    let top = clientY + 14
+    if (left + bounds.width > window.innerWidth - 8) left = clientX - bounds.width - 14
+    if (top + bounds.height > window.innerHeight - 8) top = clientY - bounds.height - 14
+    tooltip.style.left = `${Math.max(8, left)}px`
+    tooltip.style.top = `${Math.max(8, top)}px`
+  }
+
+  hideCoordinateTooltip() {
+    const tooltip = this.coordinateUi?.tooltip
+    if (!tooltip) return
+    tooltip.classList.remove('is-visible')
+    tooltip.setAttribute('aria-hidden', 'true')
+  }
+
+  saveCoordinateRecord(sample) {
+    const lastId = this.coordinateRecords.at(-1)?.id || 0
+    const roundVector = (vector) => vector.toArray().map((value) => Number(value.toFixed(6)))
+    const record = {
+      id: lastId + 1,
+      arm: sample.armNumber,
+      screen: sample.screen,
+      ndc: sample.ndc.map((value) => Number(value.toFixed(6))),
+      normalized: sample.normalized.map((value) => Number(value.toFixed(6))),
+      radius: Number(sample.radius.toFixed(6)),
+      mode: sample.mode,
+      reach: Number(sample.reach.toFixed(6)),
+      shoulderWorld: roundVector(sample.shoulderWorld),
+      cursorPlaneWorld: roundVector(sample.cursorPlaneWorld),
+      targetWorld: roundVector(sample.targetWorld),
+      blocked: sample.blocked,
+      blockedArc: sample.blockedArc,
+      timestamp: Date.now(),
+    }
+
+    this.coordinateRecords.push(record)
+    try {
+      localStorage.setItem(this.coordinateStorageKey, JSON.stringify(this.coordinateRecords))
+    } catch (error) {
+      console.warn('Coordinate records could not be saved.', error)
+    }
+    this.renderCoordinateHistory()
+  }
+
+  loadCoordinateRecords() {
+    try {
+      const records = JSON.parse(localStorage.getItem(this.coordinateStorageKey) || '[]')
+      return Array.isArray(records) ? records : []
+    } catch {
+      return []
+    }
+  }
+
+  renderCoordinateHistory() {
+    if (!this.coordinateUi) return
+
+    const { count, history, exportButton, clearButton } = this.coordinateUi
+    count.textContent = `${this.coordinateRecords.length} 个记录`
+    exportButton.disabled = this.coordinateRecords.length === 0
+    clearButton.disabled = this.coordinateRecords.length === 0
+    history.replaceChildren()
+
+    if (!this.coordinateRecords.length) {
+      const empty = document.createElement('li')
+      empty.className = 'empty-records'
+      empty.textContent = '点击画布开始记录'
+      history.appendChild(empty)
+      return
+    }
+
+    this.coordinateRecords
+      .slice(-8)
+      .reverse()
+      .forEach((record) => {
+        const item = document.createElement('li')
+        const id = document.createElement('span')
+        const values = document.createElement('span')
+        const mode = document.createElement('span')
+        id.className = 'record-id'
+        values.className = 'record-values'
+        mode.className = 'record-mode'
+        id.textContent = `#${record.id}`
+        values.textContent = `臂${record.arm}  u ${record.normalized[0].toFixed(3)}  v ${record.normalized[1].toFixed(3)}  r ${record.radius.toFixed(3)}`
+        mode.textContent = record.blocked
+          ? `禁用${record.blockedArc?.id || ''}`
+          : record.mode === 'hemisphere'
+            ? '球内'
+            : '圆周'
+        item.classList.toggle('is-blocked', Boolean(record.blocked))
+        item.append(id, values, mode)
+        history.appendChild(item)
+      })
+  }
+
+  resetClearConfirmation() {
+    if (!this.coordinateUi) return
+    window.clearTimeout(this.clearConfirmationTimer)
+    this.clearConfirmationTimer = null
+    this.coordinateUi.clearButton.dataset.confirming = 'false'
+    this.coordinateUi.clearButton.textContent = '清空'
+  }
+
+  exportCoordinateRecords() {
+    if (!this.coordinateRecords.length) return
+
+    const payload = JSON.stringify(
+      {
+        version: 1,
+        coordinateSystem: 'shoulder-plane-normalized-by-arm-length',
+        exportedAt: new Date().toISOString(),
+        records: this.coordinateRecords,
+      },
+      null,
+      2,
+    )
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'robot-click-points.json'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  setupArms() {
+    const candidates = [
+      {
+        armRootName: 'Hand_LEFT',
+        handName: 'Hand',
+        fixedAnchorName: 'Rectangle',
+        movingAnchorName: 'Rectangle_2',
+        pivotName: 'ShoulderPivot_1',
+      },
+      {
+        armRootName: 'Hand_LEFT001',
+        handName: 'Hand002',
+        fixedAnchorName: 'Rectangle001',
+        movingAnchorName: 'Rectangle_2001',
+        pivotName: 'ShoulderPivot_2',
+      },
+    ]
+
+    this.model.updateMatrixWorld(true)
+    this.arms = candidates
+      .map(({ armRootName, handName, fixedAnchorName, movingAnchorName, pivotName }) => {
+        const armRoot = this.findNode(this.model, armRootName)
+        const hand = this.findNode(this.model, handName)
+        const fixedAnchor = this.findNode(this.model, fixedAnchorName)
+        const movingAnchor = this.findNode(this.model, movingAnchorName)
+        if (!armRoot || !hand || !fixedAnchor || !movingAnchor || !this.body) return null
+
+        const fixedCenterWorld = new THREE.Box3()
+          .setFromObject(fixedAnchor)
+          .getCenter(new THREE.Vector3())
+        const shoulder = new THREE.Group()
+        shoulder.name = pivotName
+        shoulder.position.copy(this.body.worldToLocal(fixedCenterWorld.clone()))
+        this.body.add(shoulder)
+        this.model.updateMatrixWorld(true)
+
+        shoulder.attach(armRoot)
+        this.model.updateMatrixWorld(true)
+
+        const movingCenterWorld = new THREE.Box3()
+          .setFromObject(movingAnchor)
+          .getCenter(new THREE.Vector3())
+        const fixedCenterLocal = shoulder.worldToLocal(fixedCenterWorld.clone())
+        const movingCenterLocal = shoulder.worldToLocal(movingCenterWorld)
+        armRoot.position.add(fixedCenterLocal.sub(movingCenterLocal))
+        this.model.updateMatrixWorld(true)
+
+        const shoulderWorld = shoulder.getWorldPosition(new THREE.Vector3())
+        const handWorld = hand.getWorldPosition(new THREE.Vector3())
+        const reach = shoulderWorld.distanceTo(handWorld)
+        const parentInverse = shoulder.parent.matrixWorld.clone().invert()
+        const shoulderParent = shoulderWorld.clone().applyMatrix4(parentInverse)
+        const handParent = handWorld.clone().applyMatrix4(parentInverse)
+
+        return {
+          shoulder,
+          armRoot,
+          hand,
+          reach,
+          restQuaternion: shoulder.quaternion.clone(),
+          restDirectionParent: handParent.sub(shoulderParent).normalize(),
+        }
+      })
+      .filter(Boolean)
+
+    if (this.arms.length !== candidates.length) {
+      console.warn('Robot arm nodes were not found in the loaded model.')
+    }
+  }
+
+  createOrbitParticles() {
+    this.model.updateMatrixWorld(true)
+    const worldBounds = new THREE.Box3().setFromObject(this.model)
+    const modelInverse = this.model.matrixWorld.clone().invert()
+    const localBounds = worldBounds.clone().applyMatrix4(modelInverse)
+    const localSize = localBounds.getSize(new THREE.Vector3())
+    const shoulderCenters = this.arms.map((arm) =>
+      arm.shoulder.getWorldPosition(new THREE.Vector3()).applyMatrix4(modelInverse),
+    )
+    const axisCenter = shoulderCenters[0]
+      .clone()
+      .add(shoulderCenters[1])
+      .multiplyScalar(0.5)
+    const horizontalRadius = Math.max(localSize.x, localSize.z) * 0.5
+    const heightPadding = localSize.y * 0.06
+
+    this.orbitParticles = new OrbitParticles({
+      count: 220,
+      center: axisCenter,
+      minHeight: localBounds.min.y - heightPadding,
+      maxHeight: localBounds.max.y + heightPadding,
+      minRadius: horizontalRadius * 1.15,
+      maxRadius: horizontalRadius * 2.25,
+      pointSize: this.particleSize,
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+    })
+    this.model.add(this.orbitParticles)
+  }
+
+  createTargetMarker() {
+    const geometry = new THREE.RingGeometry(0.055, 0.085, 32)
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x8ee7ff,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    })
+    this.targetMarker = new THREE.Mesh(geometry, material)
+    this.targetMarker.renderOrder = 10
+    this.targetMarker.visible = false
+    this.scene.add(this.targetMarker)
+  }
+
+  handlePointerDown(event) {
+    if (this.arms.length !== 2 || !this.model) return
+
+    const sample = this.getPointerSample(event.clientX, event.clientY)
+    if (!sample) return
+
+    this.saveCoordinateRecord(sample)
+    if (sample.blocked) return
+
+    const targetQuaternion = this.getReachQuaternion(
+      sample.arm,
+      sample.shoulderWorld,
+      sample.targetWorld,
+    )
+
+    this.animateReach(sample.arm, targetQuaternion, sample.targetWorld)
+  }
+
+  selectArmForPointer(pointerX) {
+    const sorted = this.getScreenOrderedArms()
+    const leftX = sorted[0].shoulder.getWorldPosition(new THREE.Vector3()).project(this.camera).x
+    const rightX = sorted[1].shoulder.getWorldPosition(new THREE.Vector3()).project(this.camera).x
+    return pointerX < (leftX + rightX) * 0.5 ? sorted[0] : sorted[1]
+  }
+
+  getScreenOrderedArms() {
+    return [...this.arms].sort((a, b) => {
+      const aX = a.shoulder.getWorldPosition(new THREE.Vector3()).project(this.camera).x
+      const bX = b.shoulder.getWorldPosition(new THREE.Vector3()).project(this.camera).x
+      return aX - bX
+    })
+  }
+
+  getReachTarget(shoulderWorld, reach) {
+    const frontNormal = this.getFrontNormal(shoulderWorld)
+    const boundaryPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+      frontNormal,
+      shoulderWorld,
+    )
+    const cursorOnPlane = this.raycaster.ray.intersectPlane(
+      boundaryPlane,
+      new THREE.Vector3(),
+    )
+
+    if (!cursorOnPlane) {
+      return shoulderWorld.clone().addScaledVector(frontNormal, reach)
+    }
+
+    const planarDirection = cursorOnPlane.clone().sub(shoulderWorld)
+    const planarDistance = planarDirection.length()
+
+    // Outside the projected reach circle, clamp to its radial boundary.
+    if (planarDistance >= reach) {
+      if (planarDistance < 0.000001) planarDirection.set(0, 1, 0)
+      return shoulderWorld
+        .clone()
+        .addScaledVector(planarDirection.normalize(), reach)
+    }
+
+    const sphere = new THREE.Sphere(shoulderWorld, reach)
+    const intersection = this.raycaster.ray.intersectSphere(sphere, new THREE.Vector3())
+    if (
+      intersection &&
+      intersection.clone().sub(shoulderWorld).dot(frontNormal) >= 0
+    ) {
+      return intersection
+    }
+
+    // Numerical fallback for points inside the projected circle.
+    const depth = Math.sqrt(Math.max(reach * reach - planarDistance * planarDistance, 0))
+    return cursorOnPlane.addScaledVector(frontNormal, depth)
+  }
+
+  getFrontNormal(shoulderWorld) {
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(this.body.matrixWorld)
+    const towardCamera = this.camera.position.clone().sub(shoulderWorld)
+    if (normal.dot(towardCamera) < 0) normal.negate()
+    return normal.normalize()
+  }
+
+  getReachQuaternion(arm, shoulderWorld, targetWorld) {
+    const parentInverse = arm.shoulder.parent.matrixWorld.clone().invert()
+    const shoulderParent = shoulderWorld.clone().applyMatrix4(parentInverse)
+    const targetDirectionParent = targetWorld
+      .clone()
+      .applyMatrix4(parentInverse)
+      .sub(shoulderParent)
+      .normalize()
+    const delta = new THREE.Quaternion().setFromUnitVectors(
+      arm.restDirectionParent,
+      targetDirectionParent,
+    )
+    return delta.multiply(arm.restQuaternion.clone()).normalize()
+  }
+
+  animateReach(arm, targetQuaternion, targetWorld) {
+    if (this.reachTimeline) this.reachTimeline.kill()
+    this.isReaching = true
+    this.arms.forEach((item) => {
+      gsap.killTweensOf(item.shoulder.quaternion)
+      if (item !== arm) item.shoulder.quaternion.copy(item.restQuaternion)
+    })
+
+    this.targetMarker.position.copy(targetWorld)
+    this.targetMarker.quaternion.copy(this.camera.quaternion)
+    this.targetMarker.scale.setScalar(0.65)
+    this.targetMarker.material.opacity = 0
+    this.targetMarker.visible = true
+
+    const startQuaternion = arm.shoulder.quaternion.clone()
+    const reachProgress = { value: 0 }
+    const returnProgress = { value: 0 }
+
+    this.reachTimeline = gsap.timeline({
+      onComplete: () => {
+        this.targetMarker.visible = false
+        this.isReaching = false
+        this.reachTimeline = null
+      },
+    })
+    this.reachTimeline
+      .to(this.targetMarker.material, { opacity: 0.9, duration: 0.16 }, 0)
+      .to(this.targetMarker.scale, { x: 1, y: 1, z: 1, duration: 0.35 }, 0)
+      .to(
+        reachProgress,
+        {
+          value: 1,
+          duration: 0.65,
+          ease: 'power2.inOut',
+          onUpdate: () => {
+            arm.shoulder.quaternion.slerpQuaternions(
+              startQuaternion,
+              targetQuaternion,
+              reachProgress.value,
+            )
+          },
+        },
+        0,
+      )
+      .to({}, { duration: 0.8 })
+      .to(this.targetMarker.material, { opacity: 0, duration: 0.3 }, '<')
+      .to(
+        returnProgress,
+        {
+          value: 1,
+          duration: 0.7,
+          ease: 'power2.inOut',
+          onUpdate: () => {
+            arm.shoulder.quaternion.slerpQuaternions(
+              targetQuaternion,
+              arm.restQuaternion,
+              returnProgress.value,
+            )
+          },
+        },
+      )
+  }
+
+  getMouseDegrees(x, y, degreeLimit) {
+    const width = window.innerWidth
+    const height = window.innerHeight
+    const dx = ((x - width / 2) / (width / 2)) * degreeLimit
+    const dy = ((y - height / 2) / (height / 2)) * degreeLimit
+
+    return {
+      x: THREE.MathUtils.clamp(dx, -degreeLimit, degreeLimit),
+      y: THREE.MathUtils.clamp(dy * 0.5, -degreeLimit, degreeLimit),
+    }
+  }
+
+  findNode(root, name) {
+    if (!root) return null
+    if (root.name === name) return root
+
+    for (const child of root.children || []) {
+      const match = this.findNode(child, name)
+      if (match) return match
+    }
+
+    return null
+  }
+
+  hideLoading() {
+    if (!this.loading) return
+    this.loading.classList.add('is-hidden')
+  }
+}
+
+const stage = document.querySelector('#hero-stage')
+const loading = document.querySelector('#hero-loading')
+const coordinateUi = {
+  tooltip: document.querySelector('#coordinate-tooltip'),
+  count: document.querySelector('#coordinate-count'),
+  history: document.querySelector('#coordinate-history'),
+  exportButton: document.querySelector('#export-coordinates'),
+  clearButton: document.querySelector('#clear-coordinates'),
+}
+const particleUi = {
+  input: document.querySelector('#particle-size'),
+  output: document.querySelector('#particle-size-value'),
+}
+
+new RobotHero(stage, loading, coordinateUi, particleUi).init().catch((error) => {
+  console.error(error)
+  loading.textContent = '3D model failed to load'
+  loading.classList.add('has-error')
+})
