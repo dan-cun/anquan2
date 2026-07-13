@@ -4,9 +4,22 @@ import gsap from 'gsap'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { OrbitParticles } from './OrbitParticles.js'
+import { FeatureParticle } from './FeatureParticle.js'
+import { ParticleExplosion } from './ParticleExplosion.js'
 
-// Shoulder-local unit directions reconstructed from exported records #7-#13.
-const BLOCKED_SPHERICAL_ARC_POINTS = [
+const BLOCKED_SPHERICAL_ARCS = {
+  1: [
+    { id: 1, start: 75.369406588, end: 169.077120546 },
+    { id: 2, start: -105.980430769, end: -76.224797368 },
+  ],
+  2: [
+    { id: 1, start: 10.922879454, end: 104.630593412 },
+    { id: 2, start: -103.775202632, end: -74.019569231 },
+  ],
+}
+// Supplemental shoulder-local arc reconstructed from exported records #7-#13.
+const SUPPLEMENTAL_BLOCKED_ARC_POINTS = [
+  [0.350253399, -0.936654983, 0],
   [0.396010515, -0.918245976, 0],
   [0.448484916, -0.8937904, 0],
   [0.477734426, -0.878504308, 0],
@@ -15,14 +28,20 @@ const BLOCKED_SPHERICAL_ARC_POINTS = [
   [0.527717, -0.783405, 0.328315967],
   [0.541135, -0.66569, 0.513838239],
 ]
+const ADDITIONAL_BLOCKED_ARC_POINTS = [
+  [-0.304915771, -0.952379322, 0],
+  [-0.291362662, -0.956612669, 0],
+  [0.293686389, -0.955901828, 0],
+]
 const BLOCKED_ARC_TOLERANCE = THREE.MathUtils.degToRad(2)
 
 class RobotHero {
-  constructor(stage, loading, coordinateUi, particleUi) {
+  constructor(stage, loading, coordinateUi, particleUi, transitionUi) {
     this.stage = stage
     this.loading = loading
     this.coordinateUi = coordinateUi
     this.particleUi = particleUi
+    this.transitionUi = transitionUi
     this.scene = null
     this.camera = null
     this.renderer = null
@@ -35,7 +54,13 @@ class RobotHero {
     this.reachTimeline = null
     this.targetMarker = null
     this.orbitParticles = null
+    this.featureParticle = null
+    this.particleExplosion = null
     this.isReaching = false
+    this.interactionState = 'orbiting'
+    this.motionTime = 0
+    this.lastFrameTime = null
+    this.navigationTimer = null
     this.frameId = null
     this.targetRotation = { headX: 0, headY: 0, bodyX: 0, bodyY: 0 }
     this.lerpFactor = 0.05
@@ -51,6 +76,7 @@ class RobotHero {
     this.handleSamplingPointerMove = this.handleSamplingPointerMove.bind(this)
     this.handlePointerDown = this.handlePointerDown.bind(this)
     this.hideCoordinateTooltip = this.hideCoordinateTooltip.bind(this)
+    this.updateFeatureLabel = this.updateFeatureLabel.bind(this)
   }
 
   async init() {
@@ -189,6 +215,11 @@ class RobotHero {
 
   animate() {
     this.frameId = requestAnimationFrame(this.animate)
+    const now = performance.now() * 0.001
+    const deltaTime = this.lastFrameTime === null
+      ? 0
+      : Math.min(now - this.lastFrameTime, 0.05)
+    this.lastFrameTime = now
 
     if (this.head && this.body) {
       this.head.rotation.x = THREE.MathUtils.lerp(
@@ -215,8 +246,22 @@ class RobotHero {
       }
     }
 
+    if (this.interactionState === 'orbiting') {
+      this.motionTime += deltaTime
+    }
+
     if (this.orbitParticles) {
-      this.orbitParticles.update(performance.now() * 0.001)
+      this.orbitParticles.update(this.motionTime)
+    }
+    if (this.featureParticle) {
+      this.featureParticle.update(this.motionTime)
+      this.updateFeatureLabel()
+    }
+    if (this.particleExplosion && !this.particleExplosion.update(deltaTime)) {
+      this.particleExplosion.removeFromParent()
+      this.particleExplosion.geometry.dispose()
+      this.particleExplosion.material.dispose()
+      this.particleExplosion = null
     }
 
     this.renderer.render(this.scene, this.camera)
@@ -230,7 +275,10 @@ class RobotHero {
     this.camera.aspect = width / height
     this.camera.updateProjectionMatrix()
     this.renderer.setSize(width, height, false)
-    this.orbitParticles?.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+    this.orbitParticles?.setPixelRatio(pixelRatio)
+    this.featureParticle?.setPixelRatio(pixelRatio)
+    this.particleExplosion?.setPixelRatio(pixelRatio)
     this.applyResponsiveLayout()
   }
 
@@ -344,33 +392,103 @@ class RobotHero {
     upAxis,
     frontAxis,
   }) {
+    const arcs = BLOCKED_SPHERICAL_ARCS[armNumber]
+    if (!arcs?.length) return null
+
     const targetDirection = targetWorld.clone().sub(shoulderWorld).normalize()
-    const horizontalMirror = armNumber === 2 ? -1 : 1
-    const arcDirections = BLOCKED_SPHERICAL_ARC_POINTS.map(([x, y, z]) =>
-      rightAxis
-        .clone()
-        .multiplyScalar(x * horizontalMirror)
-        .addScaledVector(upAxis, y)
-        .addScaledVector(frontAxis, z)
-        .normalize(),
+    const theta = Math.atan2(
+      targetDirection.dot(upAxis),
+      targetDirection.dot(rightAxis),
     )
 
-    for (let index = 0; index < arcDirections.length - 1; index += 1) {
-      const nearestArcDirection = this.getNearestDirectionOnSphericalSegment(
-        targetDirection,
-        arcDirections[index],
-        arcDirections[index + 1],
-      )
+    for (const arc of arcs) {
+      const start = THREE.MathUtils.degToRad(arc.start)
+      const end = THREE.MathUtils.degToRad(arc.end)
+      const nearestAngle = this.getNearestAngleOnArc(theta, start, end)
+      const nearestArcDirection = rightAxis
+        .clone()
+        .multiplyScalar(Math.cos(nearestAngle))
+        .addScaledVector(upAxis, Math.sin(nearestAngle))
+        .normalize()
       const angularDistance = Math.acos(
         THREE.MathUtils.clamp(targetDirection.dot(nearestArcDirection), -1, 1),
       )
 
       if (angularDistance <= BLOCKED_ARC_TOLERANCE) {
         return {
-          id: 1,
-          source: [7, 13],
-          segment: index + 1,
+          id: arc.id,
+          start: arc.start,
+          end: arc.end,
+          angle: THREE.MathUtils.radToDeg(theta),
           distance: THREE.MathUtils.radToDeg(angularDistance),
+        }
+      }
+    }
+
+    return this.getSupplementalBlockedArc({
+      armNumber,
+      shoulderWorld,
+      targetWorld,
+      rightAxis,
+      upAxis,
+      frontAxis,
+    })
+  }
+
+  getNearestAngleOnArc(angle, start, end) {
+    const fullTurn = Math.PI * 2
+    const wrapPositive = (value) => ((value % fullTurn) + fullTurn) % fullTurn
+    const arcLength = wrapPositive(end - start)
+    const offset = wrapPositive(angle - start)
+    if (offset <= arcLength) return angle
+
+    const distanceToStart = Math.abs(Math.atan2(Math.sin(angle - start), Math.cos(angle - start)))
+    const distanceToEnd = Math.abs(Math.atan2(Math.sin(angle - end), Math.cos(angle - end)))
+    return distanceToStart <= distanceToEnd ? start : end
+  }
+
+  getSupplementalBlockedArc({
+    armNumber,
+    shoulderWorld,
+    targetWorld,
+    rightAxis,
+    upAxis,
+    frontAxis,
+  }) {
+    const targetDirection = targetWorld.clone().sub(shoulderWorld).normalize()
+    const horizontalMirror = armNumber === 2 ? -1 : 1
+    const arcPointSets = [
+      { id: 3, source: [7, 13], points: SUPPLEMENTAL_BLOCKED_ARC_POINTS },
+      { id: 4, source: ['image-1', 'image-2', 'image-3'], points: ADDITIONAL_BLOCKED_ARC_POINTS },
+    ]
+
+    for (const arc of arcPointSets) {
+      const arcDirections = arc.points.map(([x, y, z]) =>
+        rightAxis
+          .clone()
+          .multiplyScalar(x * horizontalMirror)
+          .addScaledVector(upAxis, y)
+          .addScaledVector(frontAxis, z)
+          .normalize(),
+      )
+
+      for (let index = 0; index < arcDirections.length - 1; index += 1) {
+        const nearestArcDirection = this.getNearestDirectionOnSphericalSegment(
+          targetDirection,
+          arcDirections[index],
+          arcDirections[index + 1],
+        )
+        const angularDistance = Math.acos(
+          THREE.MathUtils.clamp(targetDirection.dot(nearestArcDirection), -1, 1),
+        )
+
+        if (angularDistance <= BLOCKED_ARC_TOLERANCE) {
+          return {
+            id: arc.id,
+            source: arc.source,
+            segment: index + 1,
+            distance: THREE.MathUtils.radToDeg(angularDistance),
+          }
         }
       }
     }
@@ -697,17 +815,34 @@ class RobotHero {
     const horizontalRadius = Math.max(localSize.x, localSize.z) * 0.5
     const heightPadding = localSize.y * 0.06
 
+    const minHeight = localBounds.min.y - heightPadding
+    const maxHeight = localBounds.max.y + heightPadding
+    const minRadius = horizontalRadius * 1.15
+    const maxRadius = horizontalRadius * 2.25
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2)
+
     this.orbitParticles = new OrbitParticles({
       count: 220,
       center: axisCenter,
-      minHeight: localBounds.min.y - heightPadding,
-      maxHeight: localBounds.max.y + heightPadding,
-      minRadius: horizontalRadius * 1.15,
-      maxRadius: horizontalRadius * 2.25,
+      minHeight,
+      maxHeight,
+      minRadius,
+      maxRadius,
       pointSize: this.particleSize,
-      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+      pixelRatio,
     })
     this.model.add(this.orbitParticles)
+
+    this.featureParticle = new FeatureParticle({
+      center: axisCenter,
+      radius: minRadius,
+      height: THREE.MathUtils.lerp(minHeight, maxHeight, 0.68),
+      angle: 1.15,
+      speed: 0.03,
+      pointSize: 44,
+      pixelRatio,
+    })
+    this.model.add(this.featureParticle)
   }
 
   createTargetMarker() {
@@ -725,8 +860,34 @@ class RobotHero {
     this.scene.add(this.targetMarker)
   }
 
+  updateFeatureLabel() {
+    const label = this.transitionUi?.label
+    if (!label || !this.featureParticle || this.interactionState !== 'orbiting') {
+      label?.classList.remove('is-visible')
+      return
+    }
+
+    const worldPosition = this.featureParticle.getWorldPosition(new THREE.Vector3())
+    const projected = worldPosition.project(this.camera)
+    const rect = this.stage.getBoundingClientRect()
+    const visible = projected.z >= -1 && projected.z <= 1
+      && projected.x >= -1.15 && projected.x <= 1.15
+      && projected.y >= -1.15 && projected.y <= 1.15
+
+    if (!visible) {
+      label.classList.remove('is-visible')
+      return
+    }
+
+    label.style.left = `${(projected.x + 1) * 0.5 * rect.width}px`
+    label.style.top = `${(1 - projected.y) * 0.5 * rect.height - 12}px`
+    label.classList.add('is-visible')
+  }
+
   handlePointerDown(event) {
-    if (this.arms.length !== 2 || !this.model) return
+    if (this.arms.length !== 2 || !this.model || this.interactionState !== 'orbiting') return
+
+    if (this.handleFeatureParticleClick(event)) return
 
     const sample = this.getPointerSample(event.clientX, event.clientY)
     if (!sample) return
@@ -741,6 +902,88 @@ class RobotHero {
     )
 
     this.animateReach(sample.arm, targetQuaternion, sample.targetWorld)
+  }
+
+  handleFeatureParticleClick(event) {
+    if (!this.featureParticle?.visible) return false
+
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return false
+
+    this.pointer.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    )
+    this.model.updateMatrixWorld(true)
+    const targetWorld = this.featureParticle.getWorldPosition(new THREE.Vector3())
+    const projectedTarget = targetWorld.clone().project(this.camera)
+    const targetScreenX = rect.left + (projectedTarget.x + 1) * 0.5 * rect.width
+    const targetScreenY = rect.top + (1 - projectedTarget.y) * 0.5 * rect.height
+    const pointerDistance = Math.hypot(
+      event.clientX - targetScreenX,
+      event.clientY - targetScreenY,
+    )
+    if (projectedTarget.z < -1 || projectedTarget.z > 1 || pointerDistance > 48) return false
+
+    this.interactionState = 'reaching'
+    this.transitionUi?.label?.classList.remove('is-visible')
+
+    const arm = this.selectArmForPointer(this.pointer.x)
+    const shoulderWorld = arm.shoulder.getWorldPosition(new THREE.Vector3())
+    const targetQuaternion = this.getReachQuaternion(arm, shoulderWorld, targetWorld)
+
+    console.info('[feature-entry] selected', { target: targetWorld.toArray() })
+    this.animateReach(arm, targetQuaternion, targetWorld, {
+      holdAtTarget: true,
+      onContact: () => this.startFeatureExplosion(targetWorld),
+    })
+    return true
+  }
+
+  startFeatureExplosion(targetWorld) {
+    if (this.interactionState !== 'reaching') return
+
+    this.interactionState = 'exploding'
+    this.featureParticle.setVisible(false)
+    this.targetMarker.visible = false
+    this.particleExplosion?.removeFromParent()
+    this.particleExplosion = new ParticleExplosion({
+      center: targetWorld,
+      count: 160,
+      duration: 1.15,
+    })
+    this.scene.add(this.particleExplosion)
+
+    const overlay = this.transitionUi?.overlay
+    if (!overlay) {
+      this.completeFeatureNavigation()
+      return
+    }
+
+    gsap.to(overlay, {
+      opacity: 0.86,
+      duration: 1.35,
+      ease: 'power2.inOut',
+    })
+    window.clearTimeout(this.navigationTimer)
+    this.navigationTimer = window.setTimeout(
+      () => this.completeFeatureNavigation(),
+      1400,
+    )
+  }
+
+  completeFeatureNavigation() {
+    if (this.interactionState === 'navigating') return
+    this.interactionState = 'navigating'
+    window.clearTimeout(this.navigationTimer)
+    this.navigationTimer = null
+
+    const targetUrl = new URL(window.location.href)
+    targetUrl.searchParams.set('feature', 'function-entry')
+    console.info('[feature-entry] navigation test', targetUrl.href)
+    if (targetUrl.href === window.location.href) return
+
+    window.location.assign(targetUrl.href)
   }
 
   selectArmForPointer(pointerX) {
@@ -820,7 +1063,8 @@ class RobotHero {
     return delta.multiply(arm.restQuaternion.clone()).normalize()
   }
 
-  animateReach(arm, targetQuaternion, targetWorld) {
+  animateReach(arm, targetQuaternion, targetWorld, options = {}) {
+    const { holdAtTarget = false, onContact = null } = options
     if (this.reachTimeline) this.reachTimeline.kill()
     this.isReaching = true
     this.arms.forEach((item) => {
@@ -864,6 +1108,15 @@ class RobotHero {
         },
         0,
       )
+
+    if (holdAtTarget) {
+      this.reachTimeline
+        .to({}, { duration: 0.14 })
+        .call(() => onContact?.())
+      return
+    }
+
+    this.reachTimeline
       .to({}, { duration: 0.8 })
       .to(this.targetMarker.material, { opacity: 0, duration: 0.3 }, '<')
       .to(
@@ -926,8 +1179,12 @@ const particleUi = {
   input: document.querySelector('#particle-size'),
   output: document.querySelector('#particle-size-value'),
 }
+const transitionUi = {
+  label: document.querySelector('#feature-label'),
+  overlay: document.querySelector('#transition-overlay'),
+}
 
-new RobotHero(stage, loading, coordinateUi, particleUi).init().catch((error) => {
+new RobotHero(stage, loading, coordinateUi, particleUi, transitionUi).init().catch((error) => {
   console.error(error)
   loading.textContent = '3D model failed to load'
   loading.classList.add('has-error')

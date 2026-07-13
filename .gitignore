@@ -1,6 +1,11 @@
 node_modules/
 dist/
 *.log
+venv/
+.venv/
 
 # Local visual verification artifacts
 verify-*.png
+
+# SecMind backend runtime data
+secmind/backend/data/

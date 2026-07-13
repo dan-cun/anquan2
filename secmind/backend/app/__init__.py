@@ -1,0 +1,2 @@
+"""SecMind FastAPI application package."""
+

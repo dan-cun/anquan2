@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Asset Discovery</title>
+  <defs>
+    <linearGradient id="badge" x1="56" y1="24" x2="202" y2="218"><stop offset="0" stop-color="#164ab4"/><stop offset=".55" stop-color="#081d58"/><stop offset="1" stop-color="#020b2b"/></linearGradient>
+    <linearGradient id="edge" x1="54" y1="36" x2="206" y2="210"><stop offset="0" stop-color="#6effff"/><stop offset=".55" stop-color="#22a8ff"/><stop offset="1" stop-color="#0062ff"/></linearGradient>
+    <linearGradient id="inner" x1="74" y1="72" x2="182" y2="184"><stop offset="0" stop-color="#0e2e78"/><stop offset="1" stop-color="#06133d"/></linearGradient>
+    <linearGradient id="cyan" x1="72" y1="70" x2="188" y2="190"><stop offset="0" stop-color="#83ffff"/><stop offset="1" stop-color="#43b7ff"/></linearGradient>
+    <linearGradient id="cubeTop" x1="98" y1="84" x2="158" y2="124"><stop offset="0" stop-color="#8effff"/><stop offset="1" stop-color="#42c4ff"/></linearGradient>
+    <linearGradient id="cubeLeft" x1="94" y1="108" x2="130" y2="164"><stop offset="0" stop-color="#39c4ff"/><stop offset="1" stop-color="#1673df"/></linearGradient>
+    <linearGradient id="cubeRight" x1="128" y1="108" x2="164" y2="164"><stop offset="0" stop-color="#268cff"/><stop offset="1" stop-color="#0b45bd"/></linearGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3" result="blur"/><feColorMatrix in="blur" values="0 0 0 0 .05 0 0 0 0 .68 0 0 0 0 1 0 0 0 .65 0"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <path d="M128 22 212 70v96l-84 48-84-48V70Z" fill="url(#badge)" stroke="url(#edge)" stroke-width="6" filter="url(#softGlow)"/>
+  <path d="M128 50 188 85v70l-60 35-60-35V85Z" fill="url(#inner)" stroke="#35caff" stroke-opacity=".4" stroke-width="3"/>
+  <circle cx="128" cy="128" r="61" fill="none" stroke="#2ea7ff" stroke-opacity=".28" stroke-width="5"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#softGlow)">
+    <circle cx="112" cy="112" r="42" stroke="url(#cyan)" stroke-width="14"/>
+    <path d="M145 145 181 181" stroke="url(#cyan)" stroke-width="18"/>
+    <path d="M98 105 128 88 158 105 128 122Z" fill="url(#cubeTop)" stroke="#d9ffff" stroke-width="4"/>
+    <path d="M98 105 128 122v40l-30-17Z" fill="url(#cubeLeft)" stroke="#d9ffff" stroke-width="4"/>
+    <path d="M158 105 128 122v40l30-17Z" fill="url(#cubeRight)" stroke="#d9ffff" stroke-width="4"/>
+    <path d="M128 122v40" stroke="#d9ffff" stroke-width="4"/>
+    <path d="M78 160h24M90 148v24M164 82h22M175 71v22" stroke="#44b7ff" stroke-width="7"/>
+  </g>
+</svg>

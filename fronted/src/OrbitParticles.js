@@ -102,7 +102,7 @@ export class OrbitParticles extends THREE.Points {
       radii[index] = THREE.MathUtils.lerp(minRadius, maxRadius, Math.random())
       heights[index] = THREE.MathUtils.lerp(minHeight, maxHeight, Math.random())
       angles[index] = Math.random() * Math.PI * 2
-      orbitSpeeds[index] = THREE.MathUtils.lerp(0.3, 0.78, Math.random())
+      orbitSpeeds[index] = THREE.MathUtils.lerp(0.08, 0.24, Math.random())
       sizes[index] = THREE.MathUtils.lerp(0.68, 1.35, Math.random())
       pulseSpeeds[index] = THREE.MathUtils.lerp(1.8, 5.2, Math.random())
       pulsePhases[index] = Math.random() * Math.PI * 2

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Log Analysis</title>
+  <defs>
+    <linearGradient id="badge" x1="56" y1="24" x2="202" y2="218"><stop offset="0" stop-color="#164ab4"/><stop offset=".55" stop-color="#081d58"/><stop offset="1" stop-color="#020b2b"/></linearGradient>
+    <linearGradient id="edge" x1="54" y1="36" x2="206" y2="210"><stop offset="0" stop-color="#6effff"/><stop offset=".55" stop-color="#22a8ff"/><stop offset="1" stop-color="#0062ff"/></linearGradient>
+    <linearGradient id="inner" x1="74" y1="72" x2="182" y2="184"><stop offset="0" stop-color="#0e2e78"/><stop offset="1" stop-color="#06133d"/></linearGradient>
+    <linearGradient id="paper" x1="84" y1="70" x2="184" y2="188"><stop offset="0" stop-color="#69eaff"/><stop offset="1" stop-color="#248ee8"/></linearGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3" result="blur"/><feColorMatrix in="blur" values="0 0 0 0 .05 0 0 0 0 .68 0 0 0 0 1 0 0 0 .65 0"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <path d="M128 22 212 70v96l-84 48-84-48V70Z" fill="url(#badge)" stroke="url(#edge)" stroke-width="6" filter="url(#softGlow)"/>
+  <path d="M128 50 188 85v70l-60 35-60-35V85Z" fill="url(#inner)" stroke="#35caff" stroke-opacity=".4" stroke-width="3"/>
+  <circle cx="128" cy="128" r="61" fill="none" stroke="#2ea7ff" stroke-opacity=".28" stroke-width="5"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#softGlow)">
+    <path d="M84 70h78l24 24v92H84Z" fill="url(#paper)" stroke="#d9ffff" stroke-width="6"/>
+    <path d="M162 70v24h24" stroke="#d9ffff" stroke-width="6"/>
+    <path d="M104 113h46M104 136h34M104 159h28" stroke="#d9ffff" stroke-width="7"/>
+    <circle cx="156" cy="154" r="23" fill="#0b2b78" stroke="#84ffff" stroke-width="8"/>
+    <path d="M174 172 193 191" stroke="#84ffff" stroke-width="12"/>
+  </g>
+</svg>

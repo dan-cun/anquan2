@@ -81,6 +81,40 @@ body {
   color: #ff8a8a;
 }
 
+.feature-label {
+  position: absolute;
+  z-index: 3;
+  display: none;
+  min-width: 72px;
+  padding: 4px 7px;
+  border: 1px solid rgba(142, 231, 255, 0.42);
+  border-radius: 4px;
+  background: rgba(8, 12, 14, 0.76);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.3);
+  color: rgba(236, 251, 255, 0.94);
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: center;
+  transform: translate(-50%, -100%);
+  pointer-events: none;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+
+.feature-label.is-visible {
+  display: block;
+}
+
+.transition-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: #030405;
+  opacity: 0;
+  pointer-events: none;
+  will-change: opacity;
+}
+
 .coordinate-tooltip {
   position: fixed;
   z-index: 5;
@@ -293,5 +327,10 @@ body {
   .coordinate-tooltip {
     min-width: 178px;
     font-size: 10px;
+  }
+
+  .feature-label {
+    min-width: 64px;
+    font-size: 11px;
   }
 }
