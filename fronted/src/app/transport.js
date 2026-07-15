@@ -4,17 +4,15 @@ function trimTrailingSlash(value) {
 
 export function resolveApiBaseUrl(configuredBaseUrl, location) {
   const configured = configuredBaseUrl?.trim()
-  if (configured) return trimTrailingSlash(configured)
-  return trimTrailingSlash(location.origin)
+  const url = new URL(configured || location.origin, location.origin)
+  return trimTrailingSlash(url.href)
 }
 
 export function resolveWebSocketBaseUrl(configuredBaseUrl, apiBaseUrl, location) {
   const configured = configuredBaseUrl?.trim()
-  if (configured) return trimTrailingSlash(configured)
-
-  const apiUrl = new URL(apiBaseUrl, location.origin)
-  apiUrl.protocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:'
-  return trimTrailingSlash(apiUrl.href)
+  const url = new URL(configured || apiBaseUrl, location.origin)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return trimTrailingSlash(url.href)
 }
 
 export function buildFlowWebSocketUrl(baseUrl, flowId, afterSequence = 0) {

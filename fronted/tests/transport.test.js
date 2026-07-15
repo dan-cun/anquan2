@@ -25,6 +25,16 @@ test('uses the browser origin for same-origin HTTP and WebSocket traffic', () =>
   assert.equal(websocketBaseUrl, 'wss://secmind.example')
 })
 
+test('resolves Compose root-path configuration to valid absolute URLs', () => {
+  const apiBaseUrl = resolveApiBaseUrl('/', location)
+  const websocketBaseUrl = resolveWebSocketBaseUrl('/', apiBaseUrl, location)
+  const flowWebSocketUrl = new URL(buildFlowWebSocketUrl(websocketBaseUrl, 'flow-1'))
+
+  assert.equal(apiBaseUrl, 'https://secmind.example')
+  assert.equal(websocketBaseUrl, 'wss://secmind.example')
+  assert.equal(flowWebSocketUrl.href, 'wss://secmind.example/ws/flows/flow-1?after_sequence=0')
+})
+
 test('keeps explicit development endpoints configurable', () => {
   const apiBaseUrl = resolveApiBaseUrl('http://localhost:9000/', location)
   const websocketBaseUrl = resolveWebSocketBaseUrl('ws://localhost:9001/', apiBaseUrl, location)
