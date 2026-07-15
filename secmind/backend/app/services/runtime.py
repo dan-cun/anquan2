@@ -20,6 +20,7 @@ from app.schemas.runtime import (
     BudgetState,
     DecisionRecord,
     Finding,
+    KnowledgeHit,
     PlanStep,
     RiskLevel,
     RunStatus,
@@ -31,6 +32,7 @@ from app.schemas.runtime import (
     ToolStatus,
 )
 from app.services.ingest import IngestError, InputIngestor
+from knowledge.models import VerifierAttestation
 from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import LLMMessage
 from llm.manager import LLMProviderManager
@@ -38,6 +40,7 @@ from tools.runtime import RuntimeToolBroker
 
 if TYPE_CHECKING:
     from agents.langgraph_runtime import LangGraphRuntime
+    from knowledge.service import QdrantKnowledgeService
 
 Publisher = Callable[[dict[str, Any]], Awaitable[None] | None]
 
@@ -85,6 +88,8 @@ class RuntimeRunService:
         event_hub: RuntimeEventHub,
         llm_provider: LLMProviderManager,
         checkpointer: Any | None = None,
+        checkpoint_namespace: str = "",
+        knowledge_service: QdrantKnowledgeService | None = None,
     ) -> None:
         self.settings = settings
         self.ledger = ledger
@@ -93,6 +98,8 @@ class RuntimeRunService:
         self.llm_provider = llm_provider
         self.ingestor = InputIngestor(settings)
         self._checkpointer = checkpointer
+        self.checkpoint_namespace = checkpoint_namespace
+        self.knowledge_service = knowledge_service
         self._graph_runtime: LangGraphRuntime | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -101,7 +108,11 @@ class RuntimeRunService:
         if self._graph_runtime is None:
             from agents.langgraph_runtime import LangGraphRuntime
 
-            self._graph_runtime = LangGraphRuntime(self, checkpointer=self._checkpointer)
+            self._graph_runtime = LangGraphRuntime(
+                self,
+                checkpointer=self._checkpointer,
+                checkpoint_namespace=self.checkpoint_namespace,
+            )
         return self._graph_runtime
 
     def submit(self, task: TaskRequest) -> str:
@@ -243,10 +254,39 @@ class RuntimeRunService:
         return await self._checkpoint(state, "scenario.classified", {"scenario": scenario})
 
     async def node_retrieve_context(self, state: AgentState) -> AgentState:
+        source = "disabled"
+        error_type = None
+        if self.knowledge_service is not None:
+            source = "qdrant"
+            try:
+                results = await asyncio.to_thread(
+                    self.knowledge_service.search,
+                    query=state.task.objective,
+                    limit=5,
+                )
+                state.knowledge_hits = [
+                    KnowledgeHit(
+                        memory_id=item.document.id,
+                        content=item.document.content,
+                        source=str(item.document.metadata.get("source") or "qdrant"),
+                        version=str(item.document.metadata.get("version") or "1"),
+                        confidence=item.score,
+                        metadata=item.document.metadata,
+                    )
+                    for item in results
+                ]
+            except Exception as error:
+                source = "qdrant-error"
+                error_type = type(error).__name__
+                state.knowledge_hits = []
         return await self._checkpoint(
             state,
-            "knowledge.retrieved",
-            {"hit_count": len(state.knowledge_hits), "source": "runtime-placeholder"},
+            "context.retrieved",
+            {
+                "hit_count": len(state.knowledge_hits),
+                "source": source,
+                "error_type": error_type,
+            },
         )
 
     async def node_plan(self, state: AgentState) -> AgentState:
@@ -757,7 +797,7 @@ class RuntimeRunService:
 
     async def node_memory_commit(self, state: AgentState) -> AgentState:
         accepted = state.status == RunStatus.COMPLETED and state.verification_passed is True
-        return await self._checkpoint(
+        candidate = await self._checkpoint(
             state,
             "memory.candidate",
             {
@@ -768,6 +808,43 @@ class RuntimeRunService:
                     else "Only verified completed runs may enter long-term memory."
                 ),
             },
+        )
+        if not accepted or self.knowledge_service is None or state.report is None:
+            return candidate
+
+        verification_events = [
+            event
+            for event in self.ledger.events(state.run_id, limit=1_000_000)
+            if event.event_type == "verification.completed"
+        ]
+        if not verification_events:
+            return candidate
+        verification_event = verification_events[-1]
+        try:
+            document = await asyncio.to_thread(
+                self.knowledge_service.commit_episodic_memory,
+                title=f"Verified run {state.run_id}",
+                content=state.report.executive_summary,
+                run_id=state.run_id,
+                verification=VerifierAttestation(
+                    run_id=state.run_id,
+                    verification_event_id=verification_event.event_id,
+                    verifier_id="langgraph-verifier-v1",
+                    verdict="verified",
+                    evidence_ids=[item.evidence_id for item in state.evidence],
+                ),
+                metadata={"finding_count": len(state.findings)},
+            )
+        except Exception as error:
+            return await self._checkpoint(
+                state,
+                "memory.commit_failed",
+                {"error_type": type(error).__name__},
+            )
+        return await self._checkpoint(
+            state,
+            "memory.committed",
+            {"document_id": document.id, "verification_event_id": verification_event.event_id},
         )
 
     async def node_preflight_denial(self, state: AgentState) -> AgentState:

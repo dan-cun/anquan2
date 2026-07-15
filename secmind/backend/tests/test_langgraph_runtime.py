@@ -172,7 +172,7 @@ async def test_interrupt_and_command_resume_continue_same_graph(tmp_path: Path) 
         )
     ]
     assert "__interrupt__" in updates[-1]
-    active = graph.active_interrupt("approval-run")
+    active = await graph.active_interrupt("approval-run")
     assert active is not None
     approval_id = active["approval_id"]
     assert runtime.state("approval-run").status.value == "waiting_approval"
@@ -191,7 +191,7 @@ async def test_interrupt_and_command_resume_continue_same_graph(tmp_path: Path) 
 
     assert any("approval" in update for update in resumed)
     assert runtime.state("approval-run").status.value == "completed"
-    assert graph.active_interrupt("approval-run") is None
+    assert await graph.active_interrupt("approval-run") is None
     assert tool.calls == 1
 
 

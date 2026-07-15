@@ -95,7 +95,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
         if interrupted:
             return
 
-        graph_state = self.graph.snapshot(flow_id)
+        graph_state = await self.graph.snapshot(flow_id)
         state = self.runtime.state(flow_id) if graph_state.get("runtime_state") else None
         if graph_state.get("denied"):
             result = "Approval denied."
@@ -142,7 +142,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
             flow_id=flow_id,
             payload={"entry": entry.model_dump(mode="json")},
         )
-        active_interrupt = self.graph.active_interrupt(flow_id)
+        active_interrupt = await self.graph.active_interrupt(flow_id)
         if active_interrupt is None or active_interrupt.get("approval_id") != approval_id:
             yield WSMessage.event(
                 "server.error",
@@ -189,7 +189,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
         if interrupted:
             return
 
-        graph_state = self.graph.snapshot(flow_id)
+        graph_state = await self.graph.snapshot(flow_id)
         state = self.runtime.state(flow_id) if graph_state.get("runtime_state") else None
         yield WSMessage.event(
             "server.done",

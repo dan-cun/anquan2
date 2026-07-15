@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,8 @@ from app.schemas.runtime import AgentState, LedgerEvent, RunStatus
 ZERO_HASH = "0" * 64
 SECRET_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token"}
 SECRET_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+logger = logging.getLogger(__name__)
+EventListener = Callable[[LedgerEvent], None]
 
 
 class Base(DeclarativeBase):
@@ -82,6 +86,8 @@ class RuntimeLedgerStore:
         self.engine = create_engine(database_url, future=True, connect_args=connect_args)
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
+        self._event_listeners: list[EventListener] = []
+        self._listeners_lock = threading.RLock()
         if auto_create_schema is None:
             auto_create_schema = database_url.startswith("sqlite")
         if auto_create_schema:
@@ -94,6 +100,16 @@ class RuntimeLedgerStore:
     def _lock_for(self, run_id: str) -> threading.RLock:
         with self._locks_guard:
             return self._locks.setdefault(run_id, threading.RLock())
+
+    def add_event_listener(self, listener: EventListener) -> None:
+        with self._listeners_lock:
+            if listener not in self._event_listeners:
+                self._event_listeners.append(listener)
+
+    def remove_event_listener(self, listener: EventListener) -> None:
+        with self._listeners_lock:
+            if listener in self._event_listeners:
+                self._event_listeners.remove(listener)
 
     def append(
         self,
@@ -138,7 +154,23 @@ class RuntimeLedgerStore:
             )
             session.add(row)
             session.commit()
-            return self._to_event(row)
+            event = self._to_event(row)
+        self._notify_event_listeners(event)
+        return event
+
+    def _notify_event_listeners(self, event: LedgerEvent) -> None:
+        with self._listeners_lock:
+            listeners = tuple(self._event_listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                # The event is committed. Projection offsets make a later retry safe.
+                logger.exception(
+                    "Runtime ledger listener failed for run_id=%s sequence=%s",
+                    event.run_id,
+                    event.sequence,
+                )
 
     def events(self, run_id: str, after_sequence: int = 0, limit: int = 1000) -> list[LedgerEvent]:
         with Session(self.engine) as session:

@@ -41,7 +41,7 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev,checkpoint,postgres,qdrant]"
 
       - name: Create report directory
         run: mkdir -p reports
@@ -51,6 +51,13 @@ jobs:
 
       - name: Compile check
         run: python -m compileall -q app agents tools llm ledger knowledge sandbox tests
+
+      - name: Validate Alembic migrations
+        env:
+          SECMIND_DATABASE_URL: sqlite:///./reports/ci-migrations.db
+        run: |
+          python -m alembic -c alembic/alembic.ini upgrade head
+          python -m alembic -c alembic/alembic.ini check
 
       - name: Unit tests
         if: always()
@@ -199,8 +206,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: ci-url-safe-password
+          SECMIND_DATABASE_URL: postgresql+psycopg://secmind:ci-url-safe-password@postgres:5432/secmind
+        run: docker compose config --quiet
+
       - name: Build backend image
-        run: docker build -t secmind-backend:${{ github.sha }} secmind/backend
+        run: >-
+          docker build -f docker/backend.Dockerfile
+          -t secmind-backend:${{ github.sha }} secmind/backend
 
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@v0.32.0

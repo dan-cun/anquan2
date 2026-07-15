@@ -14,9 +14,15 @@ async def list_ledger_entries(
     services: AppServicesDep,
     limit: int | None = Query(default=None, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    after_sequence: int = Query(default=0, ge=0),
 ) -> list[LedgerEntry]:
     try:
-        return services.ledger.list_entries(flow_id=flow_id, limit=limit, offset=offset)
+        return services.ledger.list_entries(
+            flow_id=flow_id,
+            limit=limit,
+            offset=offset,
+            after_sequence=after_sequence,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

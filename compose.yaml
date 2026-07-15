@@ -28,7 +28,7 @@ x-backend-environment: &backend-environment
   SECMIND_LLM_WORKER_MODEL: ${SECMIND_LLM_WORKER_MODEL:-qwen-turbo}
   SECMIND_LLM_FALLBACK_MODEL: ${SECMIND_LLM_FALLBACK_MODEL:-qwen-max}
   SECMIND_LLM_EMBEDDING_MODEL: ${SECMIND_LLM_EMBEDDING_MODEL:-text-embedding-v3}
-  SECMIND_QDRANT_ENABLED: ${SECMIND_QDRANT_ENABLED:-true}
+  SECMIND_QDRANT_ENABLED: ${SECMIND_QDRANT_ENABLED:-false}
   SECMIND_QDRANT_URL: http://qdrant:6333
   SECMIND_QDRANT_COLLECTION: ${SECMIND_QDRANT_COLLECTION:-secmind_knowledge}
   SECMIND_QDRANT_MEMORY_COLLECTION: ${SECMIND_QDRANT_MEMORY_COLLECTION:-secmind_memory}
@@ -113,14 +113,13 @@ services:
       dockerfile: ../../docker/backend.Dockerfile
     environment: *backend-environment
     command:
-      - /bin/sh
-      - -ec
-      - |
-        if [ -f alembic.ini ] && [ -d alembic ]; then
-          alembic upgrade head
-        else
-          python -c "from app.core.config import get_settings; from ledger.runtime_store import RuntimeLedgerStore; RuntimeLedgerStore(get_settings().resolved_database_url); print('SQLAlchemy schema bootstrap completed')"
-        fi
+      - python
+      - -m
+      - alembic
+      - -c
+      - alembic/alembic.ini
+      - upgrade
+      - head
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,6 +162,7 @@ services:
     image: qdrant/qdrant:v1.13.2
     volumes:
       - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -182,6 +182,7 @@ volumes:
   secmind_data:
   postgres_data:
   qdrant_data:
+  qdrant_snapshots:
 
 networks:
   edge:

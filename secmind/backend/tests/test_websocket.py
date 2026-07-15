@@ -88,3 +88,22 @@ def test_websocket_rejects_invalid_approval_response(client):
         event = websocket.receive_json()
         assert event["type"] == "server.error"
         assert event["payload"]["message"] == "payload.approval_id is required"
+
+
+def test_websocket_replays_entries_after_sequence(client):
+    ledger = client.app.state.services.ledger
+    ledger.append("replay-flow", event_type="one", actor="test", payload={"n": 1})
+    second = ledger.append("replay-flow", event_type="two", actor="test", payload={"n": 2})
+
+    response = client.get("/api/v1/ledger/replay-flow?after_sequence=1")
+    assert response.status_code == 200
+    assert [entry["seq"] for entry in response.json()] == [2]
+
+    with client.websocket_connect("/ws/flows/replay-flow?after_sequence=1") as websocket:
+        connected = websocket.receive_json()
+        replayed = websocket.receive_json()
+
+    assert connected["type"] == "server.connected"
+    assert replayed["type"] == "server.ledger_entry"
+    assert replayed["sequence"] == second.seq
+    assert replayed["payload"]["entry"]["seq"] == second.seq

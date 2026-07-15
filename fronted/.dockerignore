@@ -1,0 +1,8 @@
+node_modules/
+dist/
+tests/
+*.log
+verify-*.png
+.git/
+.env
+.env.*

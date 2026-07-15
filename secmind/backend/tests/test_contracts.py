@@ -25,6 +25,27 @@ def test_runtime_event_names_are_unique() -> None:
     assert RuntimeEventType.MEMORY_COMMITTED == "memory.committed"
 
 
+def test_runtime_event_contract_covers_graph_and_flow_events() -> None:
+    required = {
+        "approval.invalid",
+        "approval.preflight_denied",
+        "context.retrieved",
+        "input.approval_response",
+        "input.user_message",
+        "interrupt.approval_required",
+        "memory.candidate",
+        "memory.commit_failed",
+        "memory.committed",
+        "observation.missing",
+        "step.blocked",
+        "step.denied",
+        "step.selection_complete",
+        "tool.replayed",
+    }
+
+    assert required <= {event.value for event in RuntimeEventType}
+
+
 def test_websocket_envelope_contract() -> None:
     message = WSMessage.event(
         WSServerMessageType.STATUS,

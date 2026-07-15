@@ -115,5 +115,10 @@ class QdrantKnowledgeService:
     def delete_document(self, document_id: str) -> bool:
         return self.store.delete(document_id)
 
+    def close(self) -> None:
+        self.store.close()
+        if self.memory_store is not self.store:
+            self.memory_store.close()
+
     def _embed_document(self, document: VectorDocument) -> list[float]:
         return self.embeddings.embed_one(f"{document.title}\n{document.content}")

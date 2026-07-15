@@ -9,6 +9,7 @@ from langgraph.types import Command, interrupt
 
 from app.schemas.runtime import AgentState, RunStatus, TaskRequest
 from app.services.runtime import RuntimeRunService
+from ledger.checkpoints import checkpoint_config
 
 
 class RuntimeGraphState(TypedDict, total=False):
@@ -47,9 +48,11 @@ class LangGraphRuntime:
         runtime: RuntimeRunService,
         *,
         checkpointer: Any | None = None,
+        checkpoint_namespace: str = "",
     ) -> None:
         self.runtime = runtime
         self.checkpointer = checkpointer if checkpointer is not None else MemorySaver()
+        self.checkpoint_namespace = checkpoint_namespace
         builder = StateGraph(RuntimeGraphState)
         for name in self.NODE_NAMES:
             builder.add_node(name, getattr(self, f"_{name}"))
@@ -172,11 +175,11 @@ class LangGraphRuntime:
         )
         return self._state(result)
 
-    def snapshot(self, flow_id: str) -> dict[str, Any]:
-        return dict(self.graph.get_state(self._config(flow_id)).values)
+    async def snapshot(self, flow_id: str) -> dict[str, Any]:
+        return dict((await self.graph.aget_state(self._config(flow_id))).values)
 
-    def active_interrupt(self, flow_id: str) -> dict[str, Any] | None:
-        snapshot = self.graph.get_state(self._config(flow_id))
+    async def active_interrupt(self, flow_id: str) -> dict[str, Any] | None:
+        snapshot = await self.graph.aget_state(self._config(flow_id))
         if not snapshot.interrupts:
             return None
         value = snapshot.interrupts[0].value
@@ -304,6 +307,5 @@ class LangGraphRuntime:
     def _route(state: RuntimeGraphState) -> str:
         return state.get("route", "report")
 
-    @staticmethod
-    def _config(flow_id: str) -> dict[str, Any]:
-        return {"configurable": {"thread_id": flow_id}}
+    def _config(self, flow_id: str) -> dict[str, Any]:
+        return checkpoint_config(flow_id, self.checkpoint_namespace)

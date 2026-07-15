@@ -14,13 +14,16 @@ websocket_router = APIRouter()
 
 
 @websocket_router.websocket("/ws/flows/{flow_id}")
-async def flow_websocket(websocket: WebSocket, flow_id: str) -> None:
+async def flow_websocket(websocket: WebSocket, flow_id: str, after_sequence: int = 0) -> None:
     services = websocket.app.state.services
     manager = websocket.app.state.ws_manager
     settings = websocket.app.state.settings
     supplied_key = websocket.headers.get("x-api-key") or websocket.query_params.get("api_key")
     if not is_valid_api_key(settings, supplied_key):
         await websocket.close(code=4401, reason="Invalid or missing API key")
+        return
+    if after_sequence < 0:
+        await websocket.close(code=4400, reason="after_sequence must not be negative")
         return
     services.flows.ensure_flow(flow_id, title=f"Flow {flow_id}")
 
@@ -33,6 +36,19 @@ async def flow_websocket(websocket: WebSocket, flow_id: str) -> None:
             payload={"message": "connected", "flow_id": flow_id},
         ),
     )
+    for entry in services.ledger.list_entries(
+        flow_id,
+        after_sequence=after_sequence,
+    ):
+        await manager.send_personal(
+            websocket,
+            WSMessage.event(
+                WSServerMessageType.LEDGER_ENTRY,
+                flow_id=flow_id,
+                sequence=entry.seq,
+                payload={"entry": entry.model_dump(mode="json")},
+            ),
+        )
 
     try:
         while websocket.client_state == WebSocketState.CONNECTED:

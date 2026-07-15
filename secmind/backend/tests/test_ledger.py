@@ -15,3 +15,12 @@ def test_ledger_hash_chain(tmp_path):
     assert verification.entries_checked == 2
     assert verification.anchors_checked == 1
 
+
+def test_ledger_after_sequence_cursor(tmp_path):
+    store = JsonlLedgerStore(tmp_path)
+    for number in range(1, 4):
+        store.append("flow-1", event_type="item", actor="test", payload={"n": number})
+
+    entries = store.list_entries("flow-1", after_sequence=1)
+
+    assert [entry.seq for entry in entries] == [2, 3]

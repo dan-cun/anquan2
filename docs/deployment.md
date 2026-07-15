@@ -59,17 +59,15 @@ may be deleted.
 
 ## Migration behavior
 
-The `migrate` service runs before the backend. If an `alembic.ini` file and Alembic
-migration directory are present in the backend build context, it runs:
+The `migrate` service runs before the backend and fails closed if the Alembic
+configuration or migration revision is missing. It runs:
 
 ```text
-alembic upgrade head
+python -m alembic -c alembic/alembic.ini upgrade head
 ```
 
-Until the persistence thread supplies Alembic revisions, it performs the existing
-SQLAlchemy metadata bootstrap for the runtime ledger. This fallback creates missing
-tables but cannot alter existing table definitions. Production schema changes must
-therefore be represented by Alembic revisions before release.
+Production schema changes must be represented by reviewed Alembic revisions before
+release.
 
 To rerun migrations explicitly:
 
@@ -98,8 +96,9 @@ docker compose logs --tail 200 migrate backend
 
 The frontend and backend application containers run as non-root users, use read-only
 root filesystems, drop Linux capabilities, and only receive writable tmpfs/data
-mounts. PostgreSQL and Qdrant also use read-only root filesystems; their persistent
-state is restricted to named volumes. The data network is marked internal.
+mounts. PostgreSQL and Qdrant also use read-only root filesystems; Qdrant receives
+separate storage and snapshot volumes because both paths are writable at runtime.
+Persistent state is restricted to named volumes. The data network is marked internal.
 
 ## Backend environment contract
 

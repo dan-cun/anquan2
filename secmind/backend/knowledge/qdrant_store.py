@@ -155,6 +155,11 @@ class QdrantKnowledgeStore:
         )
         return True
 
+    def close(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
+
     def search(
         self,
         vector: list[float],

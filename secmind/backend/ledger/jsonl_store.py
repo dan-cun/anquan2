@@ -61,9 +61,14 @@ class JsonlLedgerStore:
         *,
         limit: int | None = None,
         offset: int = 0,
+        after_sequence: int = 0,
     ) -> list[LedgerEntry]:
         self._validate_flow_id(flow_id)
-        entries = self._read_entries(flow_id)
+        if after_sequence < 0:
+            raise ValueError("after_sequence must not be negative")
+        entries = [
+            entry for entry in self._read_entries(flow_id) if entry.seq > after_sequence
+        ]
         sliced = entries[offset:]
         return sliced if limit is None else sliced[:limit]
 
