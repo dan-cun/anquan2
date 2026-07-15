@@ -11,13 +11,14 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
         return NullLLMProvider()
 
     if provider in {"qwen", "dashscope", "openai-compatible"}:
-        if settings.llm_api_key is None:
+        api_key = settings.resolved_llm_api_key
+        if api_key is None:
             return NullLLMProvider(
                 "LLM provider is set to qwen, but SECMIND_LLM_API_KEY is not configured."
             )
         return OpenAICompatibleProvider(
             name="qwen",
-            api_key=settings.llm_api_key.get_secret_value(),
+            api_key=api_key,
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             timeout_seconds=settings.llm_timeout_seconds,

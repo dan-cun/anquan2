@@ -7,6 +7,9 @@ import { OrbitParticles } from './OrbitParticles.js'
 import { FeatureParticle } from './FeatureParticle.js'
 import { ParticleExplosion } from './ParticleExplosion.js'
 
+const DEFAULT_PARTICLE_SIZE = 22
+const FEATURE_PARTICLE_SIZE = 44
+
 const BLOCKED_SPHERICAL_ARCS = {
   1: [
     { id: 1, start: 75.369406588, end: 169.077120546 },
@@ -526,14 +529,17 @@ class RobotHero {
   setupCoordinateUi() {
     if (!this.coordinateUi) return
 
-    this.coordinateUi.exportButton.addEventListener('click', () => {
+    const { exportButton, clearButton } = this.coordinateUi
+    if (!exportButton || !clearButton) return
+
+    exportButton.addEventListener('click', () => {
       this.exportCoordinateRecords()
     })
-    this.coordinateUi.clearButton.addEventListener('click', () => {
+    clearButton.addEventListener('click', () => {
       if (!this.coordinateRecords.length) return
-      if (this.coordinateUi.clearButton.dataset.confirming !== 'true') {
-        this.coordinateUi.clearButton.dataset.confirming = 'true'
-        this.coordinateUi.clearButton.textContent = '确认清空'
+      if (clearButton.dataset.confirming !== 'true') {
+        clearButton.dataset.confirming = 'true'
+        clearButton.textContent = '确认清空'
         window.clearTimeout(this.clearConfirmationTimer)
         this.clearConfirmationTimer = window.setTimeout(() => {
           this.resetClearConfirmation()
@@ -553,6 +559,7 @@ class RobotHero {
     if (!this.particleUi) return
 
     const { input, output } = this.particleUi
+    if (!input || !output) return
     input.value = String(this.particleSize)
     output.value = this.particleSize.toFixed(1)
     output.textContent = this.particleSize.toFixed(1)
@@ -570,15 +577,7 @@ class RobotHero {
   }
 
   loadParticleSize() {
-    try {
-      const stored = localStorage.getItem(this.particleStorageKey)
-      if (stored === null) return 10
-
-      const value = Number(stored)
-      return Number.isFinite(value) ? THREE.MathUtils.clamp(value, 4, 22) : 10
-    } catch {
-      return 10
-    }
+    return DEFAULT_PARTICLE_SIZE
   }
 
   renderCoordinateTooltip(sample, clientX, clientY) {
@@ -661,6 +660,7 @@ class RobotHero {
     if (!this.coordinateUi) return
 
     const { count, history, exportButton, clearButton } = this.coordinateUi
+    if (!count || !history || !exportButton || !clearButton) return
     count.textContent = `${this.coordinateRecords.length} 个记录`
     exportButton.disabled = this.coordinateRecords.length === 0
     clearButton.disabled = this.coordinateRecords.length === 0
@@ -699,7 +699,7 @@ class RobotHero {
   }
 
   resetClearConfirmation() {
-    if (!this.coordinateUi) return
+    if (!this.coordinateUi?.clearButton) return
     window.clearTimeout(this.clearConfirmationTimer)
     this.clearConfirmationTimer = null
     this.coordinateUi.clearButton.dataset.confirming = 'false'
@@ -839,7 +839,7 @@ class RobotHero {
       height: THREE.MathUtils.lerp(minHeight, maxHeight, 0.68),
       angle: 1.15,
       speed: 0.03,
-      pointSize: 44,
+      pointSize: FEATURE_PARTICLE_SIZE,
       pixelRatio,
     })
     this.model.add(this.featureParticle)
@@ -961,7 +961,7 @@ class RobotHero {
     }
 
     gsap.to(overlay, {
-      opacity: 0.86,
+      opacity: 1,
       duration: 1.35,
       ease: 'power2.inOut',
     })
@@ -978,11 +978,9 @@ class RobotHero {
     window.clearTimeout(this.navigationTimer)
     this.navigationTimer = null
 
-    const targetUrl = new URL(window.location.href)
-    targetUrl.searchParams.set('feature', 'function-entry')
-    console.info('[feature-entry] navigation test', targetUrl.href)
-    if (targetUrl.href === window.location.href) return
-
+    const targetUrl = new URL('/workbench', window.location.origin)
+    targetUrl.searchParams.set('source', 'feature-entry')
+    console.info('[feature-entry] navigation', targetUrl.href)
     window.location.assign(targetUrl.href)
   }
 

@@ -150,5 +150,8 @@ class MockOrchestrator(BaseOrchestrator):
     @staticmethod
     def _requires_approval(content: str) -> bool:
         lowered = content.lower()
-        return "confirm" in lowered or "approval" in lowered or "\u4eba\u5de5\u786e\u8ba4" in content
-        return "confirm" in lowered or "approval" in lowered or "人工确认" in content
+        return (
+            "confirm" in lowered
+            or "approval" in lowered
+            or "\u4eba\u5de5\u786e\u8ba4" in content
+        )

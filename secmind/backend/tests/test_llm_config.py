@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.config import Settings
 from llm.factory import build_llm_provider
 
@@ -32,3 +34,20 @@ def test_qwen_provider_without_key_is_disabled(tmp_path):
     provider = build_llm_provider(settings)
 
     assert provider.metadata()["configured"] is False
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://example.com/v1", "https://127.0.0.1/v1", "https://10.0.0.1/v1"],
+)
+def test_qwen_provider_rejects_unsafe_base_url(tmp_path, base_url):
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        ledger_dir=tmp_path / "ledger",
+        llm_provider="qwen",
+        llm_api_key="test-key",
+        llm_base_url=base_url,
+    )
+
+    with pytest.raises(ValueError, match="LLM base_url"):
+        build_llm_provider(settings)

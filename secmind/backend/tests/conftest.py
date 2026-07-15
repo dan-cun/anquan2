@@ -15,9 +15,10 @@ def client(tmp_path) -> Iterator[TestClient]:
         data_dir=tmp_path / "data",
         ledger_dir=tmp_path / "ledger",
         cors_origins=["*"],
+        llm_provider="null",
+        llm_api_key="",
         mock_step_delay_seconds=0,
     )
     app = create_app(settings)
     with TestClient(app) as test_client:
         yield test_client
-

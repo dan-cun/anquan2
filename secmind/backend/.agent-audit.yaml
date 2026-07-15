@@ -1,0 +1,8 @@
+ignore:
+  - rule_id: AGENT-026
+    paths:
+      - llm/http_client.py
+    reason: >-
+      Reviewed false positive: this factory creates a short-lived client without
+      accepting or constructing a URL; the provider validates the HTTPS model
+      endpoint before the request is made.

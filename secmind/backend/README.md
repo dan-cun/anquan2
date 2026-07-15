@@ -21,6 +21,10 @@ Useful endpoints:
 - `POST /api/v1/flows/{flow_id}/messages`
 - `GET /api/v1/ledger/{flow_id}`
 - `GET /api/v1/ledger/{flow_id}/verify`
+- `GET /api/v1/model-config`
+- `PUT /api/v1/model-config`
+- `POST /api/v1/model-config/test`
+- `GET /api/v1/model-usage`
 - `WS /ws/flows/{flow_id}`
 
 The existing `fronted` directory is intentionally left as a visual entry page.
@@ -38,6 +42,11 @@ SECMIND_LLM_BASE_URL=https://ws-6a97xnb0sh5clxp6.cn-beijing.maas.aliyuncs.com/co
 SECMIND_LLM_MODEL=qwen-plus
 ```
 
-The mock orchestrator does not call the model yet. This config prepares the
-provider for later LangGraph/agent integration without spending tokens during
-framework tests.
+The model configuration page can validate and hot-swap the in-memory provider.
+API keys are write-only and are never returned to the browser. A configured
+provider is used to generate the final runtime report summary; failures fall
+back to the deterministic report. Model request and response events, including
+OpenAI-compatible usage fields, are recorded in the runtime ledger.
+
+Runtime updates are intentionally in-memory. Restarting the backend reloads the
+provider from `.env` or the configured key file.

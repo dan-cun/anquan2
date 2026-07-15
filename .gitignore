@@ -3,9 +3,21 @@ dist/
 *.log
 venv/
 .venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 
 # Local visual verification artifacts
 verify-*.png
 
 # SecMind backend runtime data
+data/
 secmind/backend/data/
+secmind/backend/reports/
+.coverage
+coverage.xml

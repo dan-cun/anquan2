@@ -4,8 +4,38 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AULA Robot Hero</title>
+    <style>
+      html,
+      body {
+        background: #101214;
+      }
+
+      .route-transition-cover {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: #030405;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.55s ease;
+      }
+
+      html.route-transition-pending .route-transition-cover {
+        opacity: 1;
+        pointer-events: auto;
+      }
+    </style>
+    <script>
+      if (
+        window.location.pathname.startsWith('/workbench')
+        && new URLSearchParams(window.location.search).get('source') === 'feature-entry'
+      ) {
+        document.documentElement.classList.add('route-transition-pending')
+      }
+    </script>
   </head>
   <body>
+    <div class="route-transition-cover" aria-hidden="true"></div>
     <main id="app">
       <section class="hero-shell" aria-label="AULA robot hero">
         <div id="hero-stage" class="hero-stage"></div>
@@ -15,37 +45,8 @@
           &#x529F;&#x80FD;&#x5165;&#x53E3;
         </div>
         <div id="transition-overlay" class="transition-overlay" aria-hidden="true"></div>
-        <div class="control-stack">
-          <aside class="coordinate-panel" aria-label="坐标采集记录">
-            <div class="coordinate-panel__header">
-              <div>
-                <h2>坐标采集</h2>
-                <span id="coordinate-count">0 个记录</span>
-              </div>
-              <div class="coordinate-panel__actions">
-                <button id="export-coordinates" type="button">导出</button>
-                <button id="clear-coordinates" type="button">清空</button>
-              </div>
-            </div>
-            <ol id="coordinate-history" class="coordinate-history"></ol>
-          </aside>
-          <section class="particle-panel" aria-label="粒子控制">
-            <div class="particle-panel__label">
-              <label for="particle-size">粒子大小</label>
-              <output id="particle-size-value" for="particle-size">10.0</output>
-            </div>
-            <input
-              id="particle-size"
-              type="range"
-              min="4"
-              max="22"
-              step="0.5"
-              value="10"
-            />
-          </section>
-        </div>
       </section>
     </main>
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/bootstrap.js"></script>
   </body>
 </html>

@@ -1,0 +1,35 @@
+services:
+  api:
+    build: .
+    environment:
+      SECMIND_APP_ENV: production
+      SECMIND_API_KEY_FILE: ${SECMIND_API_KEY_FILE:-}
+      SECMIND_LOG_LEVEL: ${SECMIND_LOG_LEVEL:-INFO}
+      SECMIND_DATA_DIR: /app/data
+      SECMIND_LEDGER_DIR: /app/data/ledger
+      SECMIND_RUNTIME_DATABASE_URL: sqlite:////app/data/runtime/secmind.db
+      SECMIND_RUNTIME_INPUT_ROOT: /app/data/inputs
+      SECMIND_RUNTIME_UPLOAD_ROOT: /app/data/uploads
+      SECMIND_RUNTIME_RUN_ROOT: /app/data/runs
+      SECMIND_RATE_LIMIT_ENABLED: ${SECMIND_RATE_LIMIT_ENABLED:-true}
+      SECMIND_RATE_LIMIT_REQUESTS: ${SECMIND_RATE_LIMIT_REQUESTS:-120}
+      SECMIND_RATE_LIMIT_WINDOW_SECONDS: ${SECMIND_RATE_LIMIT_WINDOW_SECONDS:-60}
+      SECMIND_LLM_PROVIDER: ${SECMIND_LLM_PROVIDER:-null}
+      SECMIND_LLM_API_KEY_FILE: ${SECMIND_LLM_API_KEY_FILE:-}
+      SECMIND_LLM_BASE_URL: ${SECMIND_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      SECMIND_LLM_MODEL: ${SECMIND_LLM_MODEL:-qwen-plus}
+    ports:
+      - "8000:8000"
+    volumes:
+      - secmind_backend_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  secmind_backend_data:

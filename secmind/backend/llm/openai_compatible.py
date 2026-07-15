@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
-
-import httpx
+from urllib.parse import urlparse
 
 from llm.base import LLMMessage, LLMProvider, LLMResponse
+from llm.http_client import create_http_client
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -22,10 +23,31 @@ class OpenAICompatibleProvider(LLMProvider):
     ) -> None:
         self.name = name
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self._validate_base_url(base_url)
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
+
+    @staticmethod
+    def _validate_base_url(base_url: str) -> str:
+        parsed = urlparse(base_url.strip().rstrip("/"))
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("LLM base_url must be an HTTPS URL with a hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("LLM base_url must not contain embedded credentials")
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            address = None
+        if address is not None and (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            raise ValueError("LLM base_url must not target a private or local address")
+        return parsed.geturl()
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -52,7 +74,7 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         payload.update(kwargs)
 
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+        async with create_http_client() as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={
@@ -60,6 +82,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     "Content-Type": "application/json",
                 },
                 json=payload,
+                timeout=self.timeout_seconds,
             )
             response.raise_for_status()
             raw = response.json()

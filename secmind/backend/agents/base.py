@@ -8,6 +8,12 @@ from app.schemas.events import WSMessage
 
 
 class BaseOrchestrator(ABC):
+    """Streaming orchestration boundary for WebSocket and future LangGraph runtimes.
+
+    A real LangGraph-backed implementation should consume graph stream events here
+    and yield WSMessage instances without leaking graph-specific objects to API code.
+    """
+
     @abstractmethod
     async def handle_user_message(
         self,
@@ -37,4 +43,3 @@ class AgentPlugin(ABC):
     @abstractmethod
     async def run(self, goal: str, context: dict[str, Any]) -> dict[str, Any]:
         """Execute an agent task and return structured output."""
-
