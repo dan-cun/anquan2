@@ -28,7 +28,7 @@ RUN python -m pip install --timeout 120 --retries 5 -r /tmp/requirements.txt
 
 COPY . .
 
-RUN python -m pip install --no-deps . \
+RUN python -m pip install --no-build-isolation --no-deps . \
     && mkdir -p /app/data/inputs /app/data/uploads /app/data/runs /app/data/runtime /app/data/ledger \
     && chown -R secmind:secmind /app
 

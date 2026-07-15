@@ -14,6 +14,10 @@ import {
   getModelProviderPreset,
   modelProviderOptions,
 } from '../src/app/modelProviders.js'
+import {
+  flowStatusFromEvent,
+  toConversationItem,
+} from '../src/app/conversationEvents.js'
 
 const location = {
   origin: 'https://secmind.example',
@@ -111,4 +115,43 @@ test('provides named presets for supported OpenAI-compatible vendors', () => {
     model: 'deepseek-chat',
     baseUrl: 'https://api.deepseek.com',
   })
+})
+
+test('turns runtime envelopes into readable conversation output', () => {
+  assert.deepEqual(
+    toConversationItem({
+      type: 'server.status',
+      payload: { stage: 'langgraph.node.completed', node: 'report' },
+    }),
+    { kind: 'status', label: '执行进度', body: '模型已生成最终报告' },
+  )
+  assert.equal(
+    toConversationItem({
+      type: 'server.status',
+      payload: { stage: 'runtime.started', message: 'Runtime audit started.' },
+    }).body,
+    '正在分析任务并准备执行计划',
+  )
+  assert.deepEqual(
+    toConversationItem({
+      type: 'server.done',
+      payload: { result: '真实模型报告', report: { limitations: [] } },
+    }),
+    {
+      kind: 'assistant',
+      label: 'SecMind',
+      body: '真实模型报告',
+      report: { limitations: [] },
+    },
+  )
+  assert.equal(
+    toConversationItem({
+      type: 'server.ledger_entry',
+      payload: { entry: { event_type: 'runtime.plan.created', payload: {} } },
+    }),
+    null,
+  )
+  assert.equal(flowStatusFromEvent({ type: 'server.status' }), 'running')
+  assert.equal(flowStatusFromEvent({ type: 'server.done' }), 'finished')
+  assert.equal(flowStatusFromEvent({ type: 'server.error' }), 'failed')
 })

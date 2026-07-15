@@ -121,6 +121,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
         )
         async for event in self._mirror_runtime_events(flow_id):
             yield event
+        self._record_completion(flow_id, done_event)
         yield done_event
 
     async def handle_approval(
@@ -191,7 +192,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
 
         graph_state = await self.graph.snapshot(flow_id)
         state = self.runtime.state(flow_id) if graph_state.get("runtime_state") else None
-        yield WSMessage.event(
+        done_event = WSMessage.event(
             "server.done",
             flow_id=flow_id,
             payload={
@@ -208,6 +209,16 @@ class RuntimeOrchestrator(BaseOrchestrator):
         )
         async for event in self._mirror_runtime_events(flow_id):
             yield event
+        self._record_completion(flow_id, done_event)
+        yield done_event
+
+    def _record_completion(self, flow_id: str, event: WSMessage) -> None:
+        self.flow_ledger.append(
+            flow_id,
+            event_type="flow.completed",
+            actor="runtime_orchestrator",
+            payload=event.payload,
+        )
 
     async def _mirror_runtime_events(self, flow_id: str) -> AsyncIterator[WSMessage]:
         after_sequence = self._last_mirrored_runtime_sequence(flow_id)

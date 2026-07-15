@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.config import Settings
 from app.schemas.events import (
     WS_PROTOCOL_VERSION,
@@ -15,6 +17,13 @@ def test_agent_state_additive_contract_defaults() -> None:
     assert state.completed_step_ids == []
     assert state.verification_passed is None
     assert state.state_revision == 0
+
+
+def test_task_request_accepts_short_non_blank_unicode_objective() -> None:
+    assert TaskRequest(objective="你好").objective == "你好"
+
+    with pytest.raises(ValueError, match="objective must not be blank"):
+        TaskRequest(objective="   ")
 
 
 def test_runtime_event_names_are_unique() -> None:

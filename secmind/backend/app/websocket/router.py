@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -11,6 +12,7 @@ from app.schemas.events import WSClientMessageType, WSMessage, WSServerMessageTy
 from app.schemas.flow import FlowStatus
 
 websocket_router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @websocket_router.websocket("/ws/flows/{flow_id}")
@@ -104,14 +106,60 @@ async def flow_websocket(websocket: WebSocket, flow_id: str, after_sequence: int
 
                 services.flows.update_status(flow_id, FlowStatus.running)
                 interrupted = False
-                async for event in services.orchestrator.handle_user_message(
-                    flow_id=flow_id,
-                    content=content,
-                    metadata=message.payload.get("metadata") or {},
-                ):
-                    if event.type == WSServerMessageType.INTERRUPT:
-                        interrupted = True
-                    await manager.broadcast(flow_id, event)
+                try:
+                    async for event in services.orchestrator.handle_user_message(
+                        flow_id=flow_id,
+                        content=content,
+                        metadata=message.payload.get("metadata") or {},
+                    ):
+                        if event.type == WSServerMessageType.INTERRUPT:
+                            interrupted = True
+                        await manager.broadcast(flow_id, event)
+                except ValidationError as exc:
+                    services.flows.update_status(flow_id, FlowStatus.failed)
+                    logger.info("Flow %s rejected invalid task input", flow_id)
+                    services.ledger.append(
+                        flow_id,
+                        event_type="flow.failed",
+                        actor="runtime_orchestrator",
+                        payload={"message": "任务输入格式无效"},
+                    )
+                    await manager.send_personal(
+                        websocket,
+                        WSMessage.event(
+                            WSServerMessageType.ERROR,
+                            flow_id=flow_id,
+                            payload={
+                                "message": "任务输入格式无效",
+                                "details": exc.errors(include_url=False),
+                            },
+                        ),
+                    )
+                    continue
+                except Exception as exc:
+                    services.flows.update_status(flow_id, FlowStatus.failed)
+                    logger.exception("Flow %s runtime execution failed", flow_id)
+                    services.ledger.append(
+                        flow_id,
+                        event_type="flow.failed",
+                        actor="runtime_orchestrator",
+                        payload={
+                            "message": "任务执行失败，请查看审计记录",
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    await manager.send_personal(
+                        websocket,
+                        WSMessage.event(
+                            WSServerMessageType.ERROR,
+                            flow_id=flow_id,
+                            payload={
+                                "message": "任务执行失败，请查看审计记录",
+                                "error_type": type(exc).__name__,
+                            },
+                        ),
+                    )
+                    continue
                 services.flows.update_status(
                     flow_id,
                     FlowStatus.waiting if interrupted else FlowStatus.finished,

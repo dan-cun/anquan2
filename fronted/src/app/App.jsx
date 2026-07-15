@@ -44,6 +44,7 @@ import {
   verifyLedger,
 } from './api.js'
 import { ControlStarfield } from './ControlStarfield.jsx'
+import { flowStatusFromEvent, toConversationItem } from './conversationEvents.js'
 import { ModelUsagePage } from './pages/ModelUsagePage.jsx'
 import {
   buildFlowWebSocketUrl,
@@ -193,6 +194,16 @@ function WorkbenchPage() {
     return data
   }, [])
 
+  const updateLocalFlowStatus = useCallback((flowId, status) => {
+    if (!flowId || !status) return
+    setFlows((current) =>
+      current.map((flow) => (flow.id === flowId ? { ...flow, status } : flow)),
+    )
+    setActiveFlow((current) =>
+      current?.id === flowId ? { ...current, status } : current,
+    )
+  }, [])
+
   useEffect(() => {
     refreshFlows().catch((error) => message.error(`流程列表加载失败：${error.message}`))
   }, [refreshFlows])
@@ -225,6 +236,10 @@ function WorkbenchPage() {
     (event, fallbackRunId, { openApprovals = true } = {}) => {
       if (!appendEvent(event, fallbackRunId)) return
       if (event.type === 'server.connected') setConnectionStatus('connected')
+      updateLocalFlowStatus(
+        event.flow_id || fallbackRunId,
+        flowStatusFromEvent(event),
+      )
       const ledgerEntry = event.payload?.entry || event.payload?.ledger_entry
       if (openApprovals && event.type === 'server.interrupt') {
         openApprovalModal(event)
@@ -233,7 +248,7 @@ function WorkbenchPage() {
       }
       if (event.type === 'server.error') message.error(event.payload?.message || '后端返回错误')
     },
-    [appendEvent, openApprovalModal],
+    [appendEvent, openApprovalModal, updateLocalFlowStatus],
   )
 
   useEffect(() => {
@@ -388,6 +403,19 @@ function WorkbenchPage() {
     return 0
   }, [activeFlow, events])
 
+  const conversationItems = useMemo(
+    () =>
+      events
+        .map((event, index) => {
+          const item = toConversationItem(event)
+          return item
+            ? { ...item, key: event.request_id || `${event.type}-${index}`, timestamp: event.timestamp }
+            : null
+        })
+        .filter(Boolean),
+    [events],
+  )
+
   return (
     <div className="workbench-grid">
       {contextHolder}
@@ -437,27 +465,27 @@ function WorkbenchPage() {
           </Space>
         </div>
         <div className="message-viewport">
-          {events.length === 0 ? (
+          {conversationItems.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入任务后开始接收后端流式输出" />
           ) : (
             <div className="event-stream">
-              {events.map((event) => (
+              {conversationItems.map((item) => (
                 <div
-                  className={`event-card ${event.type === 'client.user_message' ? 'is-user' : ''}`}
-                  key={event.request_id}
+                  className={`event-card is-${item.kind}`}
+                  key={item.key}
                 >
                   <div className="event-card__meta">
-                    <Tag>{eventTitle(event.type)}</Tag>
-                    <Text type="secondary">{formatTime(event.timestamp)}</Text>
+                    <Tag>{item.label}</Tag>
+                    <Text type="secondary">{formatTime(item.timestamp)}</Text>
                   </div>
-                  <div className="event-card__body">
-                    {event.payload?.content ||
-                      event.payload?.message ||
-                      event.payload?.result ||
-                      event.payload?.stage ||
-                      event.payload?.entry?.event_type ||
-                      JSON.stringify(event.payload)}
-                  </div>
+                  <div className="event-card__body">{item.body}</div>
+                  {item.report?.limitations?.length ? (
+                    <ul className="event-card__limitations">
+                      {item.report.limitations.map((limitation) => (
+                        <li key={limitation}>{limitation}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
               ))}
             </div>

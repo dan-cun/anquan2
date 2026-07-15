@@ -103,12 +103,20 @@ class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: str = SCHEMA_VERSION
-    objective: str = Field(min_length=3, max_length=10_000)
+    objective: str = Field(min_length=1, max_length=10_000)
     attachments: list[AttachmentRef] = Field(default_factory=list)
     target_scope: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=lambda: ["security_report"])
     autonomy_policy: Literal["graded", "approval_all", "automatic"] = "graded"
+
+    @field_validator("objective")
+    @classmethod
+    def normalize_objective(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("objective must not be blank")
+        return normalized
 
 
 class InputArtifact(BaseModel):

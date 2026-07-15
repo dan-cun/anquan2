@@ -26,6 +26,29 @@ def test_websocket_mock_orchestrator(client):
         assert seen_types[-1] == "server.done"
 
 
+def test_websocket_accepts_short_chinese_input_and_returns_report(client):
+    with client.websocket_connect("/ws/flows/short-input-flow") as websocket:
+        assert websocket.receive_json()["type"] == "server.connected"
+        websocket.send_json(
+            {
+                "type": "client.user_message",
+                "payload": {"content": "你好"},
+            }
+        )
+
+        done = None
+        for _ in range(30):
+            event = websocket.receive_json()
+            assert event["type"] != "server.error"
+            if event["type"] == "server.done":
+                done = event
+                break
+
+    assert done is not None
+    assert done["payload"]["result"]
+    assert done["payload"]["report"]["executive_summary"]
+
+
 def test_websocket_approval_interrupt_roundtrip(client):
     with client.websocket_connect("/ws/flows/approval-flow") as websocket:
         connected = websocket.receive_json()
@@ -61,7 +84,7 @@ def test_websocket_approval_interrupt_roundtrip(client):
 
         seen_types = []
         done = None
-        for _ in range(10):
+        for _ in range(30):
             event = websocket.receive_json()
             seen_types.append(event["type"])
             if event["type"] == "server.done":

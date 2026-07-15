@@ -757,7 +757,11 @@ class RuntimeRunService:
             f"Code audit completed with {len(state.findings)} finding(s), supported by "
             f"{len(state.evidence)} evidence record(s)."
             if successful
-            else "The task ended without a successful security-tool observation."
+            else (
+                f"已收到任务“{state.task.objective}”，但当前没有获得可验证的安全工具结果，"
+                "因此不能生成未经证据支持的漏洞结论。请提供待分析的代码、日志或明确的"
+                "授权目标范围；如需模型生成分析说明，请先在“模型与额度”页面配置并验证模型。"
+            )
         )
         model_summary = await self._call_model(
             state,
