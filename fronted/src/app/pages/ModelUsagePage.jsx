@@ -28,6 +28,10 @@ import {
   testModelConfig,
   updateModelConfig,
 } from '../api.js'
+import {
+  getModelProviderPreset,
+  modelProviderOptions,
+} from '../modelProviders.js'
 
 const { Text, Title } = Typography
 const DEFAULT_CONFIG = {
@@ -145,6 +149,16 @@ export function ModelUsagePage() {
   const [period, setPeriod] = useState('month')
   const [usageView, setUsageView] = useState('model')
 
+  const handleProviderChange = (provider) => {
+    const preset = getModelProviderPreset(provider)
+    if (!preset) return
+    form.setFieldsValue({
+      provider,
+      model: preset.model,
+      baseUrl: preset.baseUrl,
+    })
+  }
+
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
@@ -235,10 +249,10 @@ export function ModelUsagePage() {
             >
               <Form.Item name="provider" label="Provider" rules={[{ required: true }]}>
                 <Select
-                  options={[
-                    { value: 'qwen', label: 'Qwen / DashScope' },
-                    { value: 'openai-compatible', label: 'OpenAI Compatible' },
-                  ]}
+                  showSearch
+                  optionFilterProp="label"
+                  options={modelProviderOptions()}
+                  onChange={handleProviderChange}
                 />
               </Form.Item>
 

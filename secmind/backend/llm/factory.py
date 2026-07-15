@@ -4,20 +4,31 @@ from app.core.config import Settings
 from llm.base import LLMProvider, NullLLMProvider
 from llm.openai_compatible import OpenAICompatibleProvider
 
+OPENAI_COMPATIBLE_PROVIDERS = {
+    "qwen": "qwen",
+    "dashscope": "qwen",
+    "deepseek": "deepseek",
+    "openai": "openai",
+    "moonshot": "moonshot",
+    "zhipu": "zhipu",
+    "siliconflow": "siliconflow",
+    "openai-compatible": "openai-compatible",
+}
+
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
     provider = settings.llm_provider
     if provider in {"", "null", "none", "disabled"}:
         return NullLLMProvider()
 
-    if provider in {"qwen", "dashscope", "openai-compatible"}:
+    if provider in OPENAI_COMPATIBLE_PROVIDERS:
         api_key = settings.resolved_llm_api_key
         if api_key is None:
             return NullLLMProvider(
-                "LLM provider is set to qwen, but SECMIND_LLM_API_KEY is not configured."
+                f"LLM provider is set to {provider}, but SECMIND_LLM_API_KEY is not configured."
             )
         return OpenAICompatibleProvider(
-            name="qwen",
+            name=OPENAI_COMPATIBLE_PROVIDERS[provider],
             api_key=api_key,
             base_url=settings.llm_base_url,
             model=settings.llm_model,

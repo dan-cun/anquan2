@@ -132,6 +132,26 @@ def test_model_connection_test_does_not_replace_active_provider(client):
     assert after["configured"] == before["configured"]
 
 
+def test_model_config_accepts_named_openai_compatible_provider(client):
+    services = client.app.state.services
+    services.llm_provider._factory = fake_provider_factory
+
+    response = client.put(
+        "/api/v1/model-config",
+        json={
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "deepseek-test-key",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "deepseek"
+    assert response.json()["model"] == "deepseek-chat"
+    assert "deepseek-test-key" not in response.text
+
+
 def test_model_config_rejects_missing_key_without_replacing_provider(client):
     before = client.get("/api/v1/model-config").json()
     response = client.put(

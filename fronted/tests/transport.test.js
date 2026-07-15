@@ -10,6 +10,10 @@ import {
   resolveWebSocketBaseUrl,
   unresolvedApprovalPayloads,
 } from '../src/app/transport.js'
+import {
+  getModelProviderPreset,
+  modelProviderOptions,
+} from '../src/app/modelProviders.js'
 
 const location = {
   origin: 'https://secmind.example',
@@ -93,4 +97,18 @@ test('restores only approvals that have no later response', () => {
   ]
 
   assert.deepEqual(unresolvedApprovalPayloads(entries), [pending])
+})
+
+test('provides named presets for supported OpenAI-compatible vendors', () => {
+  const options = modelProviderOptions()
+  const deepseek = getModelProviderPreset('deepseek')
+
+  assert.ok(options.some((item) => item.value === 'deepseek'))
+  assert.ok(options.some((item) => item.value === 'openai-compatible'))
+  assert.deepEqual(deepseek, {
+    value: 'deepseek',
+    label: 'DeepSeek',
+    model: 'deepseek-chat',
+    baseUrl: 'https://api.deepseek.com',
+  })
 })

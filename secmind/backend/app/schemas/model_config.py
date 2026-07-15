@@ -7,10 +7,20 @@ from typing import Literal
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+ModelProvider = Literal[
+    "qwen",
+    "dashscope",
+    "deepseek",
+    "openai",
+    "moonshot",
+    "zhipu",
+    "siliconflow",
+    "openai-compatible",
+]
 
 
 class ModelConfigInput(BaseModel):
-    provider: Literal["qwen", "dashscope", "openai-compatible"] = "qwen"
+    provider: ModelProvider = "qwen"
     model: str = Field(min_length=1, max_length=128)
     base_url: str = Field(min_length=1, max_length=2048)
     api_key: SecretStr | None = None

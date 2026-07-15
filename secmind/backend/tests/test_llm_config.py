@@ -23,6 +23,35 @@ def test_qwen_provider_configured(tmp_path):
     assert metadata["model"] == "qwen-plus"
 
 
+@pytest.mark.parametrize(
+    ("configured_name", "metadata_name"),
+    [
+        ("deepseek", "deepseek"),
+        ("openai", "openai"),
+        ("moonshot", "moonshot"),
+        ("zhipu", "zhipu"),
+        ("siliconflow", "siliconflow"),
+        ("openai-compatible", "openai-compatible"),
+    ],
+)
+def test_named_openai_compatible_provider_preserves_vendor_name(
+    tmp_path, configured_name, metadata_name
+):
+    settings = Settings(
+        data_dir=tmp_path,
+        ledger_dir=tmp_path / "ledger",
+        llm_provider=configured_name,
+        llm_api_key="secret",
+        llm_base_url="https://example.com/v1",
+        llm_model="test-model",
+    )
+
+    metadata = build_llm_provider(settings).metadata()
+
+    assert metadata["configured"] is True
+    assert metadata["name"] == metadata_name
+
+
 def test_qwen_provider_without_key_is_disabled(tmp_path):
     settings = Settings(
         data_dir=tmp_path / "data",
