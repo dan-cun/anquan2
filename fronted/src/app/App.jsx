@@ -4,8 +4,12 @@ import {
   AuditOutlined,
   CheckCircleOutlined,
   CloudServerOutlined,
+  CodeOutlined,
+  DatabaseOutlined,
   DownloadOutlined,
   ExclamationCircleOutlined,
+  FileSearchOutlined,
+  HomeOutlined,
   MessageOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -13,6 +17,7 @@ import {
   SafetyCertificateOutlined,
   SendOutlined,
   StopOutlined,
+  TeamOutlined,
 } from '@ant-design/icons'
 import {
   App as AntApp,
@@ -26,13 +31,13 @@ import {
   Select,
   Space,
   Spin,
-  Steps,
   Tag,
   Timeline,
+  Tooltip,
   Typography,
-  message,
 } from 'antd'
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
+
 import {
   API_BASE_URL,
   WS_BASE_URL,
@@ -43,7 +48,12 @@ import {
   listLedgerEntries,
   verifyLedger,
 } from './api.js'
-import { ControlStarfield } from './ControlStarfield.jsx'
+import {
+  AGENT_EDGES,
+  AGENT_ROLES,
+  NODE_LABELS,
+  collaborationState,
+} from './agentNetwork.js'
 import { flowStatusFromEvent, toConversationItem } from './conversationEvents.js'
 import { ModelUsagePage } from './pages/ModelUsagePage.jsx'
 import {
@@ -57,18 +67,43 @@ const { Header, Sider, Content } = Layout
 const { Text, Title } = Typography
 
 const navigationItems = [
-  { key: 'workbench', icon: <MessageOutlined />, label: '对话工作台' },
+  { key: 'workbench', icon: <TeamOutlined />, label: '协作工作台' },
   { key: 'audit', icon: <AuditOutlined />, label: '审计回放' },
-  { key: 'models', icon: <ApiOutlined />, label: '模型与额度' },
-  { key: 'entry', icon: <RobotOutlined />, label: '视觉入口' },
+  { key: 'models', icon: <ApiOutlined />, label: '模型与用量' },
+  { key: 'entry', icon: <HomeOutlined />, label: '视觉入口' },
 ]
 
-const flowStepItems = [
-  { title: '等待输入', description: 'CREATED' },
-  { title: '执行中', description: 'RUNNING' },
-  { title: '等待确认', description: 'WAITING' },
-  { title: '完成', description: 'FINISHED' },
-]
+const roleIcons = {
+  orchestrator: <TeamOutlined />,
+  planner: <FileSearchOutlined />,
+  executor: <CodeOutlined />,
+  reviewer: <SafetyCertificateOutlined />,
+  reporter: <DatabaseOutlined />,
+}
+
+const networkPositions = {
+  orchestrator: { x: 50, y: 13 },
+  planner: { x: 22, y: 42 },
+  executor: { x: 78, y: 42 },
+  reviewer: { x: 70, y: 78 },
+  reporter: { x: 30, y: 78 },
+}
+
+const statusLabels = {
+  created: ['default', '待运行'],
+  running: ['processing', '运行中'],
+  waiting: ['warning', '待审批'],
+  finished: ['success', '已完成'],
+  failed: ['error', '失败'],
+}
+
+const connectionLabels = {
+  idle: ['default', '未连接'],
+  connecting: ['processing', '连接中'],
+  connected: ['success', '实时连接'],
+  disconnected: ['warning', '重连中'],
+  error: ['error', '连接异常'],
+}
 
 function makeRequestId() {
   return window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -83,53 +118,80 @@ function formatTime(value) {
   }).format(new Date(value))
 }
 
-function eventTitle(type) {
-  const labels = {
-    'client.user_message': '用户输入',
-    'server.connected': '连接建立',
-    'server.status': '运行状态',
-    'server.ledger_entry': '账本记录',
-    'server.interrupt': '人工确认',
-    'server.done': '流程完成',
-    'server.error': '运行错误',
-    'server.pong': '心跳响应',
-  }
-  return labels[type] || type
+function compactId(value) {
+  if (!value) return '-'
+  return value.length > 14 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value
 }
 
-function ledgerColor(eventType) {
-  if (eventType.startsWith('interrupt.')) return 'orange'
-  if (eventType.startsWith('input.')) return 'blue'
-  if (eventType.startsWith('flow.')) return 'green'
-  if (eventType.includes('error')) return 'red'
-  return 'gray'
-}
-
-function statusTag(status) {
-  const map = {
-    created: ['default', 'CREATED'],
-    running: ['processing', 'RUNNING'],
-    waiting: ['warning', 'WAITING'],
-    finished: ['success', 'FINISHED'],
-    failed: ['error', 'FAILED'],
-  }
-  const [color, label] = map[status] || ['default', status || 'UNKNOWN']
+function StatusTag({ status }) {
+  const [color, label] = statusLabels[status] || ['default', status || '未知']
   return <Tag color={color}>{label}</Tag>
 }
 
-function connectionTag(status) {
-  const map = {
-    idle: ['default', '未连接'],
-    connecting: ['processing', '连接中'],
-    connected: ['success', '已连接'],
-    disconnected: ['warning', '已断开'],
-    error: ['error', '连接异常'],
-  }
-  const [color, label] = map[status] || map.idle
+function ConnectionTag({ status }) {
+  const [color, label] = connectionLabels[status] || connectionLabels.idle
   return <Tag color={color}>{label}</Tag>
+}
+
+function agentStatusLabel(status) {
+  return {
+    idle: '待命',
+    active: '处理中',
+    completed: '已参与',
+    waiting: '等待确认',
+    failed: '异常',
+  }[status] || status
+}
+
+function NetworkEdge({ from, to, activeRole }) {
+  const start = networkPositions[from]
+  const end = networkPositions[to]
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const length = Math.sqrt(dx * dx + dy * dy)
+  const angle = Math.atan2(dy, dx) * (180 / Math.PI)
+  const active = activeRole === from || activeRole === to
+  return (
+    <span
+      className={`network-edge ${active ? 'is-active' : ''}`}
+      style={{
+        left: `${start.x}%`,
+        top: `${start.y}%`,
+        width: `${length}%`,
+        transform: `rotate(${angle}deg)`,
+      }}
+      aria-hidden="true"
+    />
+  )
+}
+
+function AgentNetwork({ state }) {
+  return (
+    <div className="agent-network" aria-label="智能体协作网络">
+      {AGENT_EDGES.map(([from, to]) => (
+        <NetworkEdge key={`${from}-${to}`} from={from} to={to} activeRole={state.activeRole} />
+      ))}
+      {state.roles.map((role) => {
+        const position = networkPositions[role.id]
+        return (
+          <Tooltip key={role.id} title={role.description} placement="top">
+            <div
+              className={`agent-node is-${role.status}`}
+              style={{ left: `${position.x}%`, top: `${position.y}%` }}
+            >
+              <span className="agent-node__icon">{roleIcons[role.id]}</span>
+              <span className="agent-node__name">{role.shortName}</span>
+              <span className="agent-node__status">{agentStatusLabel(role.status)}</span>
+            </div>
+          </Tooltip>
+        )
+      })}
+    </div>
+  )
 }
 
 function WorkbenchPage() {
+  const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const [modal, contextHolder] = Modal.useModal()
   const [flows, setFlows] = useState([])
@@ -139,7 +201,7 @@ function WorkbenchPage() {
   const [draft, setDraft] = useState('')
   const [connectionStatus, setConnectionStatus] = useState('idle')
   const [isSending, setIsSending] = useState(false)
-  const [lastStage, setLastStage] = useState('等待输入')
+  const [lastStage, setLastStage] = useState('等待任务')
 
   const socketRef = useRef(null)
   const pendingMessagesRef = useRef([])
@@ -156,35 +218,29 @@ function WorkbenchPage() {
     pendingMessagesRef.current.push(envelope)
   }, [])
 
-  const sendApproval = useCallback(
-    (approvalId, approved) => {
-      queueOrSend({
-        type: 'client.approval_response',
-        flow_id: activeFlowIdRef.current,
-        request_id: makeRequestId(),
-        payload: {
-          approval_id: approvalId,
-          approved,
-          reason: approved ? 'operator approved in workbench' : 'operator denied in workbench',
-        },
-      })
-    },
-    [queueOrSend],
-  )
+  const sendApproval = useCallback((approvalId, approved) => {
+    queueOrSend({
+      type: 'client.approval_response',
+      flow_id: activeFlowIdRef.current,
+      request_id: makeRequestId(),
+      payload: {
+        approval_id: approvalId,
+        approved,
+        reason: approved ? 'operator approved in workbench' : 'operator denied in workbench',
+      },
+    })
+  }, [queueOrSend])
 
   const appendEvent = useCallback((event, fallbackRunId) => {
     if (!eventCursorRef.current.accept(event, fallbackRunId)) return false
-    setEvents((current) => [...current, event].slice(-200))
+    setEvents((current) => [...current, event].slice(-300))
     const ledgerEntry = event.payload?.entry || event.payload?.ledger_entry
-    if (ledgerEntry) {
-      setLedgerEntries((current) => [...current, ledgerEntry])
-    }
+    if (ledgerEntry) setLedgerEntries((current) => [...current, ledgerEntry].slice(-1000))
     if (event.type === 'server.status') {
-      setLastStage(event.payload?.message || event.payload?.stage || '执行中')
+      setLastStage(NODE_LABELS[event.payload?.node] || event.payload?.message || '正在执行')
     }
-    if (event.type === 'server.done') {
-      setLastStage('流程完成')
-    }
+    if (event.type === 'server.interrupt') setLastStage('等待人工审批')
+    if (event.type === 'server.done') setLastStage('运行已完成')
     return true
   }, [])
 
@@ -196,64 +252,59 @@ function WorkbenchPage() {
 
   const updateLocalFlowStatus = useCallback((flowId, status) => {
     if (!flowId || !status) return
-    setFlows((current) =>
-      current.map((flow) => (flow.id === flowId ? { ...flow, status } : flow)),
-    )
-    setActiveFlow((current) =>
-      current?.id === flowId ? { ...current, status } : current,
-    )
+    setFlows((current) => current.map((flow) => (
+      flow.id === flowId ? { ...flow, status } : flow
+    )))
+    setActiveFlow((current) => (
+      current?.id === flowId ? { ...current, status } : current
+    ))
   }, [])
 
   useEffect(() => {
-    refreshFlows().catch((error) => message.error(`流程列表加载失败：${error.message}`))
-  }, [refreshFlows])
-
-  const openApprovalModal = useCallback(
-    (event) => {
-      const approvalId = event.payload?.approval_id
-      if (!approvalId || handledApprovalIdsRef.current.has(approvalId)) return
-      handledApprovalIdsRef.current.add(approvalId)
-
-      modal.confirm({
-        title: event.payload?.title || '需要人工确认',
-        icon: <ExclamationCircleOutlined />,
-        content: (
-          <div className="approval-content">
-            <Text>{event.payload?.message || '后端请求人工审批后继续执行。'}</Text>
-            <Text type="secondary">审批编号：{approvalId}</Text>
-          </div>
-        ),
-        okText: '批准继续',
-        cancelText: '拒绝',
-        onOk: () => sendApproval(approvalId, true),
-        onCancel: () => sendApproval(approvalId, false),
+    refreshFlows()
+      .then((items) => {
+        setActiveFlow((current) => current || items[0] || null)
       })
-    },
-    [modal, sendApproval],
-  )
+      .catch((error) => message.error(`流程列表加载失败：${error.message}`))
+  }, [message, refreshFlows])
 
-  const handleSocketEvent = useCallback(
-    (event, fallbackRunId, { openApprovals = true } = {}) => {
-      if (!appendEvent(event, fallbackRunId)) return
-      if (event.type === 'server.connected') setConnectionStatus('connected')
-      updateLocalFlowStatus(
-        event.flow_id || fallbackRunId,
-        flowStatusFromEvent(event),
-      )
-      const ledgerEntry = event.payload?.entry || event.payload?.ledger_entry
-      if (openApprovals && event.type === 'server.interrupt') {
-        openApprovalModal(event)
-      } else if (openApprovals && ledgerEntry?.event_type?.startsWith('interrupt.')) {
-        openApprovalModal({ ...event, payload: ledgerEntry.payload })
-      }
-      if (event.type === 'server.error') message.error(event.payload?.message || '后端返回错误')
-    },
-    [appendEvent, openApprovalModal, updateLocalFlowStatus],
-  )
+  const openApprovalModal = useCallback((event) => {
+    const approvalId = event.payload?.approval_id
+    if (!approvalId || handledApprovalIdsRef.current.has(approvalId)) return
+    handledApprovalIdsRef.current.add(approvalId)
+    modal.confirm({
+      title: event.payload?.title || '需要人工审批',
+      icon: <ExclamationCircleOutlined />,
+      content: (
+        <div className="approval-content">
+          <Text>{event.payload?.message || '后端请求操作员确认后继续执行。'}</Text>
+          <Text type="secondary">审批编号：{approvalId}</Text>
+        </div>
+      ),
+      okText: '批准并继续',
+      cancelText: '拒绝',
+      onOk: () => sendApproval(approvalId, true),
+      onCancel: () => sendApproval(approvalId, false),
+    })
+  }, [modal, sendApproval])
+
+  const handleSocketEvent = useCallback((event, fallbackRunId, { openApprovals = true } = {}) => {
+    if (!appendEvent(event, fallbackRunId)) return
+    if (event.type === 'server.connected') setConnectionStatus('connected')
+    updateLocalFlowStatus(event.flow_id || fallbackRunId, flowStatusFromEvent(event))
+    const ledgerEntry = event.payload?.entry || event.payload?.ledger_entry
+    if (openApprovals && event.type === 'server.interrupt') {
+      openApprovalModal(event)
+    } else if (openApprovals && ledgerEntry?.event_type?.startsWith('interrupt.')) {
+      openApprovalModal({ ...event, payload: ledgerEntry.payload })
+    }
+    if (event.type === 'server.error') {
+      message.error(event.payload?.message || '后端返回运行错误')
+    }
+  }, [appendEvent, openApprovalModal, updateLocalFlowStatus])
 
   useEffect(() => {
     if (!activeFlow?.id) return undefined
-
     const flowId = activeFlow.id
     let disposed = false
     let reconnectTimer = null
@@ -264,23 +315,21 @@ function WorkbenchPage() {
     setEvents([])
     setLedgerEntries([])
     setConnectionStatus('connecting')
+    setLastStage('正在恢复运行上下文')
     handledApprovalIdsRef.current = new Set()
 
     const replayMissingLedgerEntries = async () => {
-      const afterSequence = eventCursorRef.current.afterSequence(flowId)
-      const entries = await listLedgerEntries(flowId, { afterSequence })
+      const entries = await listLedgerEntries(flowId, {
+        afterSequence: eventCursorRef.current.afterSequence(flowId),
+      })
       if (disposed) return
       entries.forEach((entry) => {
         handleSocketEvent(ledgerEntryToSocketEvent(entry), flowId, { openApprovals: false })
       })
-
       unresolvedApprovalPayloads(entries).forEach((payload) => {
-        openApprovalModal({
-          type: 'server.interrupt',
-          flow_id: flowId,
-          payload,
-        })
+        openApprovalModal({ type: 'server.interrupt', flow_id: flowId, payload })
       })
+      if (entries.length === 0) setLastStage('等待任务')
     }
 
     const connect = () => {
@@ -294,13 +343,10 @@ function WorkbenchPage() {
         if (disposed || socketRef.current !== socket) return
         reconnectAttempt = 0
         setConnectionStatus('connected')
-
         const queued = pendingMessagesRef.current
         pendingMessagesRef.current = queued.filter((item) => item.flow_id !== flowId)
-        queued
-          .filter((item) => item.flow_id === flowId)
+        queued.filter((item) => item.flow_id === flowId)
           .forEach((item) => socket.send(JSON.stringify(item)))
-
         replayMissingLedgerEntries().catch((error) => {
           message.error(`断线事件补齐失败：${error.message}`)
         })
@@ -310,16 +356,15 @@ function WorkbenchPage() {
         try {
           handleSocketEvent(JSON.parse(raw.data), flowId)
         } catch {
-          message.error('无法解析后端流式事件')
+          message.error('无法解析后端实时事件')
         }
       })
 
       socket.addEventListener('close', () => {
         if (disposed || socketRef.current !== socket) return
         setConnectionStatus('disconnected')
-        const delay = Math.min(1000 * 2 ** reconnectAttempt, 10000)
+        reconnectTimer = window.setTimeout(connect, Math.min(1000 * 2 ** reconnectAttempt, 10000))
         reconnectAttempt += 1
-        reconnectTimer = window.setTimeout(connect, delay)
       })
 
       socket.addEventListener('error', () => {
@@ -328,7 +373,6 @@ function WorkbenchPage() {
     }
 
     connect()
-
     return () => {
       disposed = true
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
@@ -342,36 +386,34 @@ function WorkbenchPage() {
   }, [activeFlow?.id, handleSocketEvent, openApprovalModal])
 
   async function handleCreateFlow() {
-    const flow = await createFlow({ title: '新建安全分析流程' })
-    setFlows((current) => [flow, ...current.filter((item) => item.id !== flow.id)])
-    setActiveFlow(flow)
-    setLastStage('等待输入')
+    try {
+      const flow = await createFlow({ title: '新建安全分析流程' })
+      setFlows((current) => [flow, ...current.filter((item) => item.id !== flow.id)])
+      setActiveFlow(flow)
+      setLastStage('等待任务')
+    } catch (error) {
+      message.error(`创建流程失败：${error.message}`)
+    }
   }
 
   async function handleSend() {
     const content = draft.trim()
     if (!content || isSending) return
     setIsSending(true)
-
     try {
       let flow = activeFlow
       if (!flow) {
-        flow = await createFlow({
-          title: content.slice(0, 48),
-          initial_input: content,
-        })
+        flow = await createFlow({ title: content.slice(0, 48), initial_input: content })
         setFlows((current) => [flow, ...current.filter((item) => item.id !== flow.id)])
         setActiveFlow(flow)
       }
-
-      const localEvent = {
+      appendEvent({
         type: 'client.user_message',
         flow_id: flow.id,
         request_id: makeRequestId(),
         timestamp: new Date().toISOString(),
         payload: { content },
-      }
-      appendEvent(localEvent)
+      })
       setDraft('')
       setLastStage('提交任务')
       queueOrSend({
@@ -393,28 +435,17 @@ function WorkbenchPage() {
     }
   }
 
-  const currentStep = useMemo(() => {
-    if (!activeFlow) return 0
-    if (activeFlow.status === 'waiting') return 2
-    if (activeFlow.status === 'finished') return 3
-    if (events.some((event) => event.type === 'server.interrupt')) return 2
-    if (events.some((event) => event.type === 'server.done')) return 3
-    if (events.some((event) => event.type === 'server.status')) return 1
-    return 0
-  }, [activeFlow, events])
+  const conversationItems = useMemo(() => events.map((event, index) => {
+    const item = toConversationItem(event)
+    return item ? {
+      ...item,
+      key: event.request_id || `${event.type}-${index}`,
+      timestamp: event.timestamp,
+    } : null
+  }).filter(Boolean), [events])
 
-  const conversationItems = useMemo(
-    () =>
-      events
-        .map((event, index) => {
-          const item = toConversationItem(event)
-          return item
-            ? { ...item, key: event.request_id || `${event.type}-${index}`, timestamp: event.timestamp }
-            : null
-        })
-        .filter(Boolean),
-    [events],
-  )
+  const networkState = useMemo(() => collaborationState(events), [events])
+  const completedRoleCount = networkState.roles.filter((role) => role.completedCount > 0).length
 
   return (
     <div className="workbench-grid">
@@ -422,10 +453,12 @@ function WorkbenchPage() {
       <aside className="session-panel app-panel">
         <div className="panel-heading">
           <div>
-            <Text className="panel-kicker">Flows</Text>
-            <Title level={4}>会话列表</Title>
+            <Text className="panel-kicker">RUNS</Text>
+            <Title level={4}>任务流程</Title>
           </div>
-          <Button type="text" icon={<ReloadOutlined />} aria-label="刷新流程" onClick={refreshFlows} />
+          <Tooltip title="刷新流程">
+            <Button type="text" icon={<ReloadOutlined />} aria-label="刷新流程" onClick={refreshFlows} />
+          </Tooltip>
         </div>
         <Button type="primary" icon={<PlusOutlined />} block onClick={handleCreateFlow}>
           新建流程
@@ -433,68 +466,93 @@ function WorkbenchPage() {
         <div className="session-list">
           {flows.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无流程" />
-          ) : (
-            flows.map((flow) => (
-              <button
-                className={`session-item ${activeFlow?.id === flow.id ? 'is-active' : ''}`}
-                key={flow.id}
-                type="button"
-                onClick={() => setActiveFlow(flow)}
-              >
-                <span>{flow.title}</span>
-                {statusTag(flow.status)}
-              </button>
-            ))
-          )}
+          ) : flows.map((flow) => (
+            <button
+              className={`session-item ${activeFlow?.id === flow.id ? 'is-active' : ''}`}
+              key={flow.id}
+              type="button"
+              onClick={() => setActiveFlow(flow)}
+            >
+              <span className="session-item__body">
+                <strong>{flow.title}</strong>
+                <small>{compactId(flow.id)}</small>
+              </span>
+              <StatusTag status={flow.status} />
+            </button>
+          ))}
         </div>
       </aside>
 
       <section className="conversation-panel app-panel">
         <div className="panel-heading conversation-heading">
-          <div>
-            <Text className="panel-kicker">Current Flow</Text>
-            <Title level={4}>{activeFlow?.title || '未选择流程'}</Title>
+          <div className="flow-heading-copy">
+            <Text className="panel-kicker">ACTIVE FLOW</Text>
+            <Title level={4}>{activeFlow?.title || '选择或创建流程'}</Title>
           </div>
-          <Space>
-            {connectionTag(connectionStatus)}
+          <Space size={6} wrap>
+            <ConnectionTag status={connectionStatus} />
+            {activeFlow ? <StatusTag status={activeFlow.status} /> : null}
             {activeFlow?.id ? (
-              <Button size="small" onClick={() => navigate(`/audit/${activeFlow.id}`)}>
-                查看审计
-              </Button>
+              <Tooltip title="打开审计回放">
+                <Button
+                  type="text"
+                  icon={<AuditOutlined />}
+                  aria-label="打开审计回放"
+                  onClick={() => navigate(`/audit/${activeFlow.id}`)}
+                />
+              </Tooltip>
             ) : null}
           </Space>
         </div>
+
+        <div className="collaboration-strip">
+          {networkState.roles.map((role, index) => (
+            <React.Fragment key={role.id}>
+              {index > 0 ? <span className="strip-arrow">›</span> : null}
+              <span className={`strip-role is-${role.status}`}>
+                {roleIcons[role.id]}
+                {role.shortName}
+              </span>
+            </React.Fragment>
+          ))}
+        </div>
+
         <div className="message-viewport">
           {conversationItems.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入任务后开始接收后端流式输出" />
+            <div className="empty-workbench">
+              <RobotOutlined />
+              <Title level={4}>提交一个授权范围内的安全任务</Title>
+              <Text type="secondary">运行进度、角色协作与证据事件会在此实时显示。</Text>
+            </div>
           ) : (
             <div className="event-stream">
               {conversationItems.map((item) => (
-                <div
-                  className={`event-card is-${item.kind}`}
-                  key={item.key}
-                >
+                <article className={`event-card is-${item.kind}`} key={item.key}>
                   <div className="event-card__meta">
-                    <Tag>{item.label}</Tag>
+                    <span>{item.label}</span>
                     <Text type="secondary">{formatTime(item.timestamp)}</Text>
                   </div>
                   <div className="event-card__body">{item.body}</div>
                   {item.report?.limitations?.length ? (
-                    <ul className="event-card__limitations">
-                      {item.report.limitations.map((limitation) => (
-                        <li key={limitation}>{limitation}</li>
-                      ))}
-                    </ul>
+                    <div className="event-card__limitations">
+                      <strong>限制</strong>
+                      <ul>
+                        {item.report.limitations.map((limitation) => (
+                          <li key={limitation}>{limitation}</li>
+                        ))}
+                      </ul>
+                    </div>
                   ) : null}
-                </div>
+                </article>
               ))}
             </div>
           )}
         </div>
+
         <div className="composer">
           <Input.TextArea
             autoSize={{ minRows: 2, maxRows: 6 }}
-            placeholder="输入安全分析任务；包含 confirm、approval 或 人工确认 可触发审批弹窗"
+            placeholder="描述安全分析目标、授权范围、约束和期望输出"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onPressEnter={(event) => {
@@ -505,46 +563,68 @@ function WorkbenchPage() {
             }}
             aria-label="任务内容"
           />
-          <Button
-            type="primary"
-            icon={<SendOutlined />}
-            loading={isSending}
-            onClick={handleSend}
-            aria-label="发送任务"
-          />
+          <Tooltip title="发送任务">
+            <Button
+              type="primary"
+              icon={<SendOutlined />}
+              loading={isSending}
+              onClick={handleSend}
+              aria-label="发送任务"
+            />
+          </Tooltip>
         </div>
       </section>
 
       <aside className="inspector-panel app-panel">
         <div className="panel-heading">
           <div>
-            <Text className="panel-kicker">Runtime</Text>
-            <Title level={4}>执行检查器</Title>
+            <Text className="panel-kicker">COLLABORATION</Text>
+            <Title level={4}>智能体网络</Title>
           </div>
-          <CloudServerOutlined className="heading-icon" />
+          <TeamOutlined className="heading-icon" />
         </div>
-        <Steps orientation="vertical" size="small" current={currentStep} items={flowStepItems} />
-        <Descriptions
-          className="status-descriptions"
-          size="small"
-          column={1}
-          items={[
-            { key: 'socket', label: 'WebSocket', children: connectionTag(connectionStatus) },
-            { key: 'stage', label: '当前阶段', children: lastStage },
-            { key: 'ledger', label: '账本事件', children: ledgerEntries.length },
-            {
-              key: 'flow',
-              label: 'Flow ID',
-              children: activeFlow?.id || '-',
-            },
-          ]}
-        />
+        <AgentNetwork state={networkState} />
+        <div className="runtime-summary">
+          <div className="summary-metric">
+            <span>当前节点</span>
+            <strong>{NODE_LABELS[networkState.latestNode] || lastStage}</strong>
+          </div>
+          <div className="summary-metric-grid">
+            <div><span>参与角色</span><strong>{completedRoleCount} / {AGENT_ROLES.length}</strong></div>
+            <div><span>账本事件</span><strong>{ledgerEntries.length}</strong></div>
+          </div>
+        </div>
+        <div className="role-list">
+          {networkState.roles.map((role) => (
+            <div className={`role-row is-${role.status}`} key={role.id}>
+              <span className="role-row__icon">{roleIcons[role.id]}</span>
+              <span className="role-row__copy">
+                <strong>{role.name}</strong>
+                <small>{role.description}</small>
+              </span>
+              <span className="role-row__status">{agentStatusLabel(role.status)}</span>
+            </div>
+          ))}
+        </div>
+        <div className="runtime-footer">
+          <CloudServerOutlined />
+          <span title={activeFlow?.id}>{compactId(activeFlow?.id)}</span>
+        </div>
       </aside>
     </div>
   )
 }
 
+function ledgerColor(eventType = '') {
+  if (eventType.startsWith('interrupt.')) return 'orange'
+  if (eventType.startsWith('input.')) return 'blue'
+  if (eventType.startsWith('flow.')) return 'green'
+  if (eventType.includes('failed') || eventType.includes('error')) return 'red'
+  return 'gray'
+}
+
 function AuditPage() {
+  const { message } = AntApp.useApp()
   const { flowId } = useParams()
   const navigate = useNavigate()
   const [flows, setFlows] = useState([])
@@ -607,19 +687,11 @@ function AuditPage() {
     navigate(`/audit/${id}`)
   }
 
-  function handleManualLoad() {
-    const id = manualFlowId.trim()
-    if (!id) return
-    handleSelectFlow(id)
-  }
-
   const auditJsonl = useMemo(
     () => entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''),
     [entries],
   )
-  const auditDownloadUrl = `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(
-    auditJsonl || '\n',
-  )}`
+  const auditDownloadUrl = `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(auditJsonl || '\n')}`
 
   const timelineItems = entries.map((entry) => ({
     color: ledgerColor(entry.event_type),
@@ -629,12 +701,8 @@ function AuditPage() {
         type="button"
         onClick={() => setSelectedEntry(entry)}
       >
-        <span className="timeline-entry__title">
-          #{entry.seq} {entry.event_type}
-        </span>
-        <span className="timeline-entry__meta">
-          {entry.actor} · {formatTime(entry.created_at)}
-        </span>
+        <span className="timeline-entry__title">#{entry.seq} {entry.event_type}</span>
+        <span className="timeline-entry__meta">{entry.actor} · {formatTime(entry.created_at)}</span>
       </button>
     ),
   }))
@@ -643,81 +711,71 @@ function AuditPage() {
     <div className="audit-page">
       <div className="page-toolbar">
         <div>
-          <Text className="panel-kicker">Ledger Projection</Text>
+          <Text className="panel-kicker">LEDGER PROJECTION</Text>
           <Title level={3}>审计回放</Title>
         </div>
-        <Button
-          className="export-log-button"
-          icon={<DownloadOutlined />}
-          href={auditDownloadUrl}
-          download={`${selectedFlowId || 'secmind'}-audit-log.jsonl`}
-          disabled={entries.length === 0}
-        >
-          导出 JSONL
-        </Button>
         <Space className="page-toolbar-actions" wrap>
           <Select
             className="flow-select"
             placeholder="选择流程"
             value={selectedFlowId || undefined}
-            options={flows.map((flow) => ({
-              value: flow.id,
-              label: flow.title,
-            }))}
+            options={flows.map((flow) => ({ value: flow.id, label: flow.title }))}
             onChange={handleSelectFlow}
             aria-label="选择审计流程"
           />
           <Input.Search
             className="flow-id-search"
-            placeholder="输入 flow_id"
+            placeholder="输入 Flow ID"
             value={manualFlowId}
             onChange={(event) => setManualFlowId(event.target.value)}
-            onSearch={handleManualLoad}
+            onSearch={() => manualFlowId.trim() && handleSelectFlow(manualFlowId.trim())}
             enterButton="加载"
           />
-          <Button icon={<ReloadOutlined />} onClick={() => loadLedger(selectedFlowId)}>
-            刷新
-          </Button>
-          {verifyResult?.valid ? (
-            <Tag icon={<CheckCircleOutlined />} color="success">
-              哈希链有效
-            </Tag>
-          ) : (
-            <Tag icon={<StopOutlined />} color={verifyResult ? 'error' : 'default'}>
-              等待校验
-            </Tag>
-          )}
+          <Tooltip title="刷新账本">
+            <Button icon={<ReloadOutlined />} onClick={() => loadLedger(selectedFlowId)} aria-label="刷新账本" />
+          </Tooltip>
+          <Tooltip title="导出 JSONL">
+            <Button
+              icon={<DownloadOutlined />}
+              href={auditDownloadUrl}
+              download={`${selectedFlowId || 'secmind'}-audit-log.jsonl`}
+              disabled={entries.length === 0}
+              aria-label="导出 JSONL"
+            />
+          </Tooltip>
         </Space>
+      </div>
+
+      <div className="audit-status-band">
+        {verifyResult?.valid ? (
+          <Tag icon={<CheckCircleOutlined />} color="success">哈希链有效</Tag>
+        ) : (
+          <Tag icon={<StopOutlined />} color={verifyResult ? 'error' : 'default'}>等待校验</Tag>
+        )}
+        <Text type="secondary">{entries.length} 条记录 · {anchors.length} 个锚点</Text>
+        <Text type="secondary">账本按序号回放，接收时间不参与排序</Text>
       </div>
 
       <div className="audit-grid">
         <section className="timeline-panel app-panel">
           <div className="panel-heading">
             <div>
-              <Text className="panel-kicker">Events</Text>
-              <Title level={4}>垂直时间轴</Title>
+              <Text className="panel-kicker">EVENTS</Text>
+              <Title level={4}>事件时间线</Title>
             </div>
-            <Space>
-              <Text type="secondary">{entries.length} 条记录</Text>
-              <Text type="secondary">{anchors.length} 个锚点</Text>
-            </Space>
           </div>
           <div className="timeline-scroll">
-            {loading ? (
-              <Spin />
-            ) : timelineItems.length === 0 ? (
+            {loading ? <Spin /> : timelineItems.length === 0 ? (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无账本数据" />
-            ) : (
-              <Timeline mode="left" items={timelineItems} />
-            )}
+            ) : <Timeline items={timelineItems} />}
           </div>
         </section>
 
         <aside className="detail-panel app-panel">
           <div className="panel-heading">
             <div>
-              <Text className="panel-kicker">Detail</Text>
-              <Title level={4}>步骤详情</Title>
+              <Text className="panel-kicker">EVENT DETAIL</Text>
+              <Title level={4}>事件详情</Title>
             </div>
           </div>
           <Descriptions
@@ -728,8 +786,8 @@ function AuditPage() {
               { key: 'type', label: '事件', children: selectedEntry?.event_type || '-' },
               { key: 'actor', label: '执行者', children: selectedEntry?.actor || '-' },
               { key: 'time', label: '时间', children: selectedEntry?.created_at || '-' },
-              { key: 'hash', label: '哈希', children: selectedEntry?.hash || '-' },
-              { key: 'prev', label: '前序哈希', children: selectedEntry?.prev_hash || '-' },
+              { key: 'hash', label: '哈希', children: compactId(selectedEntry?.hash) },
+              { key: 'prev', label: '前序哈希', children: compactId(selectedEntry?.prev_hash) },
             ]}
           />
           <div className="payload-block">
@@ -752,67 +810,50 @@ function AppLayout() {
   const [backendInfo, setBackendInfo] = useState(null)
   const selectedKey = location.pathname.startsWith('/audit')
     ? 'audit'
-    : location.pathname.startsWith('/models')
-      ? 'models'
-      : 'workbench'
+    : location.pathname.startsWith('/models') ? 'models' : 'workbench'
 
   useEffect(() => {
-    getInfo()
-      .then(setBackendInfo)
-      .catch(() => setBackendInfo(null))
+    getInfo().then(setBackendInfo).catch(() => setBackendInfo(null))
   }, [])
 
-  const handleNavigation = ({ key }) => {
-    if (key === 'entry') {
-      window.location.assign('/')
-      return
-    }
-    navigate(`/${key}`)
-  }
+  const pageTitle = {
+    audit: ['审计回放', <AuditOutlined key="audit" />],
+    models: ['模型与用量', <ApiOutlined key="models" />],
+    workbench: ['智能体协作工作台', <TeamOutlined key="workbench" />],
+  }[selectedKey]
 
   return (
     <Layout className="feature-shell">
-      <ControlStarfield />
-      <Sider width={208} breakpoint="lg" collapsedWidth={64} className="app-sider">
+      <Sider width={190} breakpoint="lg" collapsedWidth={60} className="app-sider">
         <div className="product-mark">
           <SafetyCertificateOutlined />
-          <span>SecMind</span>
+          <span>SECMIND</span>
         </div>
         <Menu
           theme="dark"
           mode="inline"
           selectedKeys={[selectedKey]}
           items={navigationItems}
-          onClick={handleNavigation}
+          onClick={({ key }) => {
+            if (key === 'entry') window.location.assign('/')
+            else navigate(`/${key}`)
+          }}
         />
+        <div className="sider-version">AGENT RUNTIME</div>
       </Sider>
       <Layout>
         <Header className="app-header">
-          <div className="header-title">
-            {selectedKey === 'audit' ? (
-              <AuditOutlined />
-            ) : selectedKey === 'models' ? (
-              <ApiOutlined />
-            ) : (
-              <MessageOutlined />
-            )}
-            <span>
-              {selectedKey === 'audit'
-                ? '审计回放'
-                : selectedKey === 'models'
-                  ? '模型选择与额度消耗'
-                  : '对话工作台'}
-            </span>
-          </div>
-          <Space>
-            <Text type="secondary">{API_BASE_URL}</Text>
+          <div className="header-title">{pageTitle[1]}<span>{pageTitle[0]}</span></div>
+          <Space size={8}>
+            <Text className="api-endpoint" type="secondary">{API_BASE_URL}</Text>
+            <Tag color={backendInfo ? 'success' : 'warning'}>
+              {backendInfo ? '后端在线' : '后端未确认'}
+            </Tag>
             {backendInfo ? (
-              <Tag color={backendInfo.extensions?.llmProvider?.configured ? 'success' : 'default'}>
-                {backendInfo.extensions?.llmProvider?.name || 'llm'}
+              <Tag color={backendInfo.extensions?.llmProvider?.configured ? 'processing' : 'default'}>
+                {backendInfo.extensions?.llmProvider?.name || 'LLM 未配置'}
               </Tag>
-            ) : (
-              <Tag color="warning">后端未确认</Tag>
-            )}
+            ) : null}
           </Space>
         </Header>
         <Content className="app-content">
@@ -830,9 +871,5 @@ function AppLayout() {
 }
 
 export function FeatureApp() {
-  return (
-    <AntApp>
-      <AppLayout />
-    </AntApp>
-  )
+  return <AntApp><AppLayout /></AntApp>
 }

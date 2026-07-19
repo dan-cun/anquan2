@@ -15,23 +15,16 @@ import {
   Form,
   Input,
   Progress,
+  Segmented,
   Select,
   Space,
   Spin,
-  Segmented,
   Tag,
   Typography,
 } from 'antd'
-import {
-  getModelConfig,
-  getModelUsage,
-  testModelConfig,
-  updateModelConfig,
-} from '../api.js'
-import {
-  getModelProviderPreset,
-  modelProviderOptions,
-} from '../modelProviders.js'
+
+import { getModelConfig, getModelUsage, testModelConfig, updateModelConfig } from '../api.js'
+import { getModelProviderPreset, modelProviderOptions } from '../modelProviders.js'
 
 const { Text, Title } = Typography
 const DEFAULT_CONFIG = {
@@ -43,7 +36,7 @@ const DEFAULT_CONFIG = {
 
 const formatNumber = (value) => new Intl.NumberFormat('en-US').format(Number(value) || 0)
 
-const formatTime = (value) => {
+function formatTime(value) {
   if (!value) return '暂无记录'
   return new Intl.DateTimeFormat('zh-CN', {
     month: '2-digit',
@@ -54,10 +47,9 @@ const formatTime = (value) => {
 }
 
 function UsageProgress({ value, total }) {
-  const percent = total > 0 ? Math.round((value / total) * 100) : 0
   return (
     <Progress
-      percent={percent}
+      percent={total > 0 ? Math.round((value / total) * 100) : 0}
       showInfo={false}
       strokeColor="#63d7ff"
       trailColor="#2b3136"
@@ -132,9 +124,7 @@ function toApiPayload(values) {
     model: values.model.trim(),
     base_url: values.baseUrl.trim().replace(/\/$/, ''),
   }
-  if (values.apiKey?.trim()) {
-    payload.api_key = values.apiKey.trim()
-  }
+  if (values.apiKey?.trim()) payload.api_key = values.apiKey.trim()
   return payload
 }
 
@@ -152,11 +142,7 @@ export function ModelUsagePage() {
   const handleProviderChange = (provider) => {
     const preset = getModelProviderPreset(provider)
     if (!preset) return
-    form.setFieldsValue({
-      provider,
-      model: preset.model,
-      baseUrl: preset.baseUrl,
-    })
+    form.setFieldsValue({ provider, model: preset.model, baseUrl: preset.baseUrl })
   }
 
   const loadData = useCallback(async () => {
@@ -207,7 +193,7 @@ export function ModelUsagePage() {
       })
       setConfig(nextConfig)
       form.setFieldValue('apiKey', '')
-      message.success('模型连接已验证，运行时 Provider 已更新')
+      message.success('模型连接已验证，运行时配置已更新')
       setUsage(await getModelUsage(period))
     } catch (error) {
       message.error(error.message)
@@ -221,7 +207,7 @@ export function ModelUsagePage() {
       <header className="model-page-heading">
         <div>
           <Text className="panel-kicker">MODEL RUNTIME</Text>
-          <Title level={3}>模型选择与额度消耗</Title>
+          <Title level={3}>模型配置与用量</Title>
         </div>
         <Tag color={config?.configured ? 'success' : 'default'}>
           {config?.configured ? '后端已同步' : '尚未配置'}
@@ -236,7 +222,7 @@ export function ModelUsagePage() {
                 <Text className="panel-kicker">MODEL CONFIGURATION</Text>
                 <Title level={4} id="model-config-title">运行时模型</Title>
               </div>
-              <ApiOutlined className="heading-icon model-heading-icon" />
+              <ApiOutlined className="heading-icon" />
             </div>
 
             <Form
@@ -255,7 +241,6 @@ export function ModelUsagePage() {
                   onChange={handleProviderChange}
                 />
               </Form.Item>
-
               <Form.Item
                 name="model"
                 label="模型名称"
@@ -263,7 +248,6 @@ export function ModelUsagePage() {
               >
                 <Input prefix={<ApiOutlined />} placeholder="qwen-plus" autoComplete="off" />
               </Form.Item>
-
               <Form.Item
                 name="baseUrl"
                 label="Base URL"
@@ -274,7 +258,6 @@ export function ModelUsagePage() {
               >
                 <Input prefix={<ApiOutlined />} placeholder={DEFAULT_CONFIG.baseUrl} autoComplete="url" />
               </Form.Item>
-
               <Form.Item name="apiKey" label="API Key">
                 <Input.Password
                   prefix={<KeyOutlined />}
@@ -282,16 +265,11 @@ export function ModelUsagePage() {
                   autoComplete="new-password"
                 />
               </Form.Item>
-
               <div className="model-form-footer">
-                <Text type="secondary">
-                  密钥仅提交到后端内存，不回传，也不会写入 localStorage。
-                </Text>
+                <Text type="secondary">密钥只提交到后端，不会写入浏览器存储或由接口返回。</Text>
                 <Space wrap>
                   <Button icon={<ReloadOutlined />} onClick={loadData}>重新加载</Button>
-                  <Button icon={<ExperimentOutlined />} loading={testing} onClick={handleTest}>
-                    测试连接
-                  </Button>
+                  <Button icon={<ExperimentOutlined />} loading={testing} onClick={handleTest}>测试连接</Button>
                   <Button type="primary" htmlType="submit" loading={saving} icon={<SaveOutlined />}>
                     验证并应用
                   </Button>
@@ -312,7 +290,7 @@ export function ModelUsagePage() {
                 options={[
                   { label: '日', value: 'day' },
                   { label: '月', value: 'month' },
-                  { label: '总', value: 'total' },
+                  { label: '总计', value: 'total' },
                 ]}
                 onChange={setPeriod}
               />
@@ -321,38 +299,28 @@ export function ModelUsagePage() {
               <div className="usage-total">
                 <Text className="usage-total-label">TOTAL TOKENS</Text>
                 <strong>{formatNumber(usage?.total_tokens)}</strong>
-                <Text type="secondary">
-                  {formatNumber(usage?.request_count)} 次请求 · 费用待单价配置
-                </Text>
+                <Text type="secondary">{formatNumber(usage?.request_count)} 次请求 · 费用等待单价配置</Text>
               </div>
               <Segmented
                 block
                 value={usageView}
                 options={[
-                  { label: '模型消耗', value: 'model' },
-                  { label: '对话消耗', value: 'conversation' },
+                  { label: '按模型', value: 'model' },
+                  { label: '按流程', value: 'conversation' },
                 ]}
                 onChange={setUsageView}
               />
               {usageView === 'model' ? (
                 <ModelUsageList items={usage?.by_model || []} total={usage?.total_tokens || 0} />
               ) : (
-                <ConversationUsageList
-                  items={usage?.by_conversation || []}
-                  total={usage?.total_tokens || 0}
-                />
+                <ConversationUsageList items={usage?.by_conversation || []} total={usage?.total_tokens || 0} />
               )}
               {!usage?.total_tokens && !loading ? (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="当前时间范围暂无用量"
-                />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前时间范围暂无用量" />
               ) : null}
               <div className="usage-model-list">
                 <WalletOutlined className="usage-inline-icon" />
-                <Text type="secondary">
-                  数据来自运行账本中的 `llm.response.usage` 字段，费用需要配置模型单价。
-                </Text>
+                <Text type="secondary">统计来自运行账本中的 llm.response.usage 字段。</Text>
               </div>
             </div>
           </section>

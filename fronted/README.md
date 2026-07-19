@@ -1,9 +1,12 @@
-# AULA Robot Hero
+# SecMind Frontend
 
-Minimal Three.js reproduction of the AULA Hub robot hero. It keeps the
-full-screen dark stage, 3D robot model, environment reflection, camera intro,
-and mouse-follow motion. The background logo and business UI are intentionally
-omitted.
+The frontend contains the Three.js visual entry and the operational SecMind
+agent collaboration workbench. The workbench consumes the existing REST,
+WebSocket, replay, approval, audit-ledger, and model-configuration contracts.
+
+The runtime collaboration map is derived from LangGraph node events. The full
+backend reproduction scope and remaining specialist-agent work are documented
+in `../docs/pentagi-core-reproduction.md`.
 
 ## Run
 

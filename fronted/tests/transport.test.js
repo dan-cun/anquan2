@@ -123,14 +123,14 @@ test('turns runtime envelopes into readable conversation output', () => {
       type: 'server.status',
       payload: { stage: 'langgraph.node.completed', node: 'report' },
     }),
-    { kind: 'status', label: '执行进度', body: '模型已生成最终报告' },
+    { kind: 'status', label: '报告智能体', body: '生成最终报告' },
   )
   assert.equal(
     toConversationItem({
       type: 'server.status',
       payload: { stage: 'runtime.started', message: 'Runtime audit started.' },
     }).body,
-    '正在分析任务并准备执行计划',
+    '运行内核已启动，正在建立任务上下文',
   )
   assert.deepEqual(
     toConversationItem({
@@ -139,7 +139,7 @@ test('turns runtime envelopes into readable conversation output', () => {
     }),
     {
       kind: 'assistant',
-      label: 'SecMind',
+      label: '报告智能体',
       body: '真实模型报告',
       report: { limitations: [] },
     },
