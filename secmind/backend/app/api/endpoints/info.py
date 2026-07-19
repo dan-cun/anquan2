@@ -25,7 +25,15 @@ async def get_info(
             {"key": "settings", "path": "/settings", "status": "reserved"},
         ],
         "extensions": {
-            "tools": services.tool_registry.list_metadata(),
+            "tools": [
+                item.model_dump(mode="json") for item in services.tool_gateway.definitions()
+            ],
+            "agents": [
+                item.model_dump(mode="json") for item in services.agent_registry.descriptors()
+            ],
+            "mcpServers": [
+                item.model_dump(mode="json") for item in services.mcp_manager.snapshots()
+            ],
             "llmProvider": services.llm_provider.metadata(),
             "sandbox": services.sandbox.name,
         },

@@ -485,12 +485,12 @@ textarea {
   position: absolute;
   z-index: 2;
   display: grid;
-  grid-template-columns: 25px auto;
+  grid-template-columns: 20px auto;
   grid-template-rows: auto auto;
   column-gap: 6px;
-  width: 91px;
-  min-height: 48px;
-  padding: 6px 7px;
+  width: 80px;
+  min-height: 44px;
+  padding: 5px 5px;
   border: 1px solid #343c41;
   border-radius: 5px;
   background: #1b2023;
@@ -510,13 +510,17 @@ textarea {
 }
 
 .agent-node__name {
+  min-width: 0;
   color: #d9e0e2;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .agent-node__status {
-  font-size: 9px;
+  min-width: 0;
+  font-size: 8px;
+  overflow-wrap: anywhere;
 }
 
 .agent-node.is-active {
@@ -919,6 +923,103 @@ textarea {
   color: #f0b35a;
 }
 
+.management-page {
+  height: 100%;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.summary-band {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  margin-bottom: 8px;
+  border-block: 1px solid #2b3034;
+  background: #15191b;
+}
+
+.summary-band > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 14px;
+  border-right: 1px solid #2b3034;
+}
+
+.summary-band > div:last-child {
+  border-right: 0;
+}
+
+.summary-band span {
+  color: #738087;
+  font-size: 9px;
+}
+
+.summary-band strong {
+  color: #e9eff1;
+  font-size: 18px;
+  font-weight: 620;
+}
+
+.management-grid {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.9fr) minmax(520px, 1.1fr);
+  gap: 8px;
+  min-height: 600px;
+}
+
+.management-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.management-stack > .app-panel {
+  overflow-x: auto;
+}
+
+.catalog-panel,
+.prompt-detail {
+  min-height: 0;
+}
+
+.management-table-scroll,
+.prompt-detail-scroll {
+  max-height: calc(100vh - 250px);
+  overflow: auto;
+}
+
+.prompt-detail-scroll {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 14px;
+}
+
+.template-preview {
+  display: grid;
+  gap: 7px;
+}
+
+.template-preview textarea,
+.ant-modal textarea[aria-label="Prompt 内容"] {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.center-state {
+  display: grid;
+  min-height: 280px;
+  place-items: center;
+}
+
+.ant-table-tbody > tr.is-selected > td {
+  background: #1d2c32 !important;
+}
+
+.catalog-panel .ant-table-tbody > tr {
+  cursor: pointer;
+}
+
 @media (max-width: 1280px) {
   .workbench-grid {
     grid-template-columns: 210px minmax(390px, 1fr) 300px;
@@ -943,7 +1044,8 @@ textarea {
   }
 
   .model-usage-grid,
-  .audit-grid {
+  .audit-grid,
+  .management-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1005,7 +1107,24 @@ textarea {
   }
 
   .audit-grid,
-  .model-usage-grid {
+  .model-usage-grid,
+  .management-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .management-page {
+    padding: 7px;
+  }
+
+  .summary-band {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summary-band > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .summary-band > div:nth-child(-n + 2) {
+    border-bottom: 1px solid #2b3034;
   }
 }

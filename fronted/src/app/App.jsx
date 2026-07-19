@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiOutlined,
   AuditOutlined,
@@ -6,9 +6,11 @@ import {
   CloudServerOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  DeploymentUnitOutlined,
   DownloadOutlined,
   ExclamationCircleOutlined,
   FileSearchOutlined,
+  FileTextOutlined,
   HomeOutlined,
   MessageOutlined,
   PlusOutlined,
@@ -53,9 +55,10 @@ import {
   AGENT_ROLES,
   NODE_LABELS,
   collaborationState,
+  nativeCollaborationState,
 } from './agentNetwork.js'
+import { loadNativeNetwork } from './graphql.js'
 import { flowStatusFromEvent, toConversationItem } from './conversationEvents.js'
-import { ModelUsagePage } from './pages/ModelUsagePage.jsx'
 import {
   buildFlowWebSocketUrl,
   EventCursor,
@@ -66,9 +69,21 @@ import {
 const { Header, Sider, Content } = Layout
 const { Text, Title } = Typography
 
+const ModelUsagePage = lazy(() => import('./pages/ModelUsagePage.jsx').then((module) => ({
+  default: module.ModelUsagePage,
+})))
+const McpManagementPage = lazy(() => import('./pages/McpManagementPage.jsx').then((module) => ({
+  default: module.McpManagementPage,
+})))
+const PromptManagementPage = lazy(() => import('./pages/PromptManagementPage.jsx').then((module) => ({
+  default: module.PromptManagementPage,
+})))
+
 const navigationItems = [
   { key: 'workbench', icon: <TeamOutlined />, label: '协作工作台' },
   { key: 'audit', icon: <AuditOutlined />, label: '审计回放' },
+  { key: 'prompts', icon: <FileTextOutlined />, label: 'Prompt 目录' },
+  { key: 'mcp', icon: <DeploymentUnitOutlined />, label: 'MCP 与工具' },
   { key: 'models', icon: <ApiOutlined />, label: '模型与用量' },
   { key: 'entry', icon: <HomeOutlined />, label: '视觉入口' },
 ]
@@ -87,6 +102,27 @@ const networkPositions = {
   executor: { x: 78, y: 42 },
   reviewer: { x: 70, y: 78 },
   reporter: { x: 30, y: 78 },
+}
+
+function networkPosition(index, total) {
+  if (total > 5) {
+    const columns = 3
+    const rows = Math.ceil(total / columns)
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    return {
+      x: ((column + 0.5) / columns) * 100,
+      y: ((row + 0.5) / rows) * 100,
+    }
+  }
+  const role = AGENT_ROLES[index]?.id
+  if (role && networkPositions[role]) return networkPositions[role]
+  const angle = -Math.PI / 2 + (index / Math.max(total, 1)) * Math.PI * 2
+  return { x: 50 + Math.cos(angle) * 37, y: 50 + Math.sin(angle) * 37 }
+}
+
+function roleIcon(role) {
+  return roleIcons[role] || <RobotOutlined />
 }
 
 const statusLabels = {
@@ -143,9 +179,9 @@ function agentStatusLabel(status) {
   }[status] || status
 }
 
-function NetworkEdge({ from, to, activeRole }) {
-  const start = networkPositions[from]
-  const end = networkPositions[to]
+function NetworkEdge({ from, to, activeRole, positions }) {
+  const start = positions[from] || networkPositions[from] || { x: 50, y: 50 }
+  const end = positions[to] || networkPositions[to] || { x: 50, y: 50 }
   const dx = end.x - start.x
   const dy = end.y - start.y
   const length = Math.sqrt(dx * dx + dy * dy)
@@ -166,20 +202,30 @@ function NetworkEdge({ from, to, activeRole }) {
 }
 
 function AgentNetwork({ state }) {
+  const positions = Object.fromEntries(
+    state.roles.map((role, index) => [role.id, networkPosition(index, state.roles.length)]),
+  )
+  const edges = state.edges || AGENT_EDGES.map(([from, to]) => ({ from, to }))
   return (
     <div className="agent-network" aria-label="智能体协作网络">
-      {AGENT_EDGES.map(([from, to]) => (
-        <NetworkEdge key={`${from}-${to}`} from={from} to={to} activeRole={state.activeRole} />
+      {edges.map(({ from, to, id }) => (
+        <NetworkEdge
+          key={id || `${from}-${to}`}
+          from={from}
+          to={to}
+          activeRole={state.activeRole}
+          positions={positions}
+        />
       ))}
       {state.roles.map((role) => {
-        const position = networkPositions[role.id]
+        const position = positions[role.id]
         return (
           <Tooltip key={role.id} title={role.description} placement="top">
             <div
               className={`agent-node is-${role.status}`}
               style={{ left: `${position.x}%`, top: `${position.y}%` }}
             >
-              <span className="agent-node__icon">{roleIcons[role.id]}</span>
+              <span className="agent-node__icon">{roleIcon(role.id)}</span>
               <span className="agent-node__name">{role.shortName}</span>
               <span className="agent-node__status">{agentStatusLabel(role.status)}</span>
             </div>
@@ -196,6 +242,7 @@ function WorkbenchPage() {
   const [modal, contextHolder] = Modal.useModal()
   const [flows, setFlows] = useState([])
   const [activeFlow, setActiveFlow] = useState(null)
+  const [nativeNetwork, setNativeNetwork] = useState(null)
   const [events, setEvents] = useState([])
   const [ledgerEntries, setLedgerEntries] = useState([])
   const [draft, setDraft] = useState('')
@@ -268,6 +315,29 @@ function WorkbenchPage() {
       .catch((error) => message.error(`流程列表加载失败：${error.message}`))
   }, [message, refreshFlows])
 
+  useEffect(() => {
+    if (!activeFlow?.id) {
+      setNativeNetwork(null)
+      return undefined
+    }
+    let disposed = false
+    const refreshNativeNetwork = () => {
+      loadNativeNetwork(activeFlow.id)
+        .then((data) => {
+          if (!disposed) setNativeNetwork(data)
+        })
+        .catch(() => {
+          if (!disposed) setNativeNetwork(null)
+        })
+    }
+    refreshNativeNetwork()
+    const timer = window.setInterval(refreshNativeNetwork, 2000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [activeFlow?.id])
+
   const openApprovalModal = useCallback((event) => {
     const approvalId = event.payload?.approval_id
     if (!approvalId || handledApprovalIdsRef.current.has(approvalId)) return
@@ -308,6 +378,7 @@ function WorkbenchPage() {
     const flowId = activeFlow.id
     let disposed = false
     let reconnectTimer = null
+    let heartbeatTimer = null
     let reconnectAttempt = 0
 
     activeFlowIdRef.current = flowId
@@ -343,6 +414,17 @@ function WorkbenchPage() {
         if (disposed || socketRef.current !== socket) return
         reconnectAttempt = 0
         setConnectionStatus('connected')
+        if (heartbeatTimer) window.clearInterval(heartbeatTimer)
+        heartbeatTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'client.ping',
+              flow_id: flowId,
+              request_id: makeRequestId(),
+              payload: {},
+            }))
+          }
+        }, 30000)
         const queued = pendingMessagesRef.current
         pendingMessagesRef.current = queued.filter((item) => item.flow_id !== flowId)
         queued.filter((item) => item.flow_id === flowId)
@@ -362,6 +444,7 @@ function WorkbenchPage() {
 
       socket.addEventListener('close', () => {
         if (disposed || socketRef.current !== socket) return
+        if (heartbeatTimer) window.clearInterval(heartbeatTimer)
         setConnectionStatus('disconnected')
         reconnectTimer = window.setTimeout(connect, Math.min(1000 * 2 ** reconnectAttempt, 10000))
         reconnectAttempt += 1
@@ -376,6 +459,7 @@ function WorkbenchPage() {
     return () => {
       disposed = true
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
+      if (heartbeatTimer) window.clearInterval(heartbeatTimer)
       if (activeFlowIdRef.current === flowId) activeFlowIdRef.current = null
       const socket = socketRef.current
       if (socket) {
@@ -444,7 +528,10 @@ function WorkbenchPage() {
     } : null
   }).filter(Boolean), [events])
 
-  const networkState = useMemo(() => collaborationState(events), [events])
+  const networkState = useMemo(
+    () => nativeCollaborationState(nativeNetwork) || collaborationState(events),
+    [events, nativeNetwork],
+  )
   const completedRoleCount = networkState.roles.filter((role) => role.completedCount > 0).length
 
   return (
@@ -510,7 +597,7 @@ function WorkbenchPage() {
             <React.Fragment key={role.id}>
               {index > 0 ? <span className="strip-arrow">›</span> : null}
               <span className={`strip-role is-${role.status}`}>
-                {roleIcons[role.id]}
+                {roleIcon(role.id)}
                 {role.shortName}
               </span>
             </React.Fragment>
@@ -590,14 +677,14 @@ function WorkbenchPage() {
             <strong>{NODE_LABELS[networkState.latestNode] || lastStage}</strong>
           </div>
           <div className="summary-metric-grid">
-            <div><span>参与角色</span><strong>{completedRoleCount} / {AGENT_ROLES.length}</strong></div>
+            <div><span>参与角色</span><strong>{completedRoleCount} / {networkState.roles.length}</strong></div>
             <div><span>账本事件</span><strong>{ledgerEntries.length}</strong></div>
           </div>
         </div>
         <div className="role-list">
           {networkState.roles.map((role) => (
             <div className={`role-row is-${role.status}`} key={role.id}>
-              <span className="role-row__icon">{roleIcons[role.id]}</span>
+              <span className="role-row__icon">{roleIcon(role.id)}</span>
               <span className="role-row__copy">
                 <strong>{role.name}</strong>
                 <small>{role.description}</small>
@@ -810,7 +897,11 @@ function AppLayout() {
   const [backendInfo, setBackendInfo] = useState(null)
   const selectedKey = location.pathname.startsWith('/audit')
     ? 'audit'
-    : location.pathname.startsWith('/models') ? 'models' : 'workbench'
+    : location.pathname.startsWith('/prompts')
+      ? 'prompts'
+      : location.pathname.startsWith('/mcp')
+        ? 'mcp'
+        : location.pathname.startsWith('/models') ? 'models' : 'workbench'
 
   useEffect(() => {
     getInfo().then(setBackendInfo).catch(() => setBackendInfo(null))
@@ -818,6 +909,8 @@ function AppLayout() {
 
   const pageTitle = {
     audit: ['审计回放', <AuditOutlined key="audit" />],
+    prompts: ['Prompt 目录', <FileTextOutlined key="prompts" />],
+    mcp: ['MCP 与工具', <DeploymentUnitOutlined key="mcp" />],
     models: ['模型与用量', <ApiOutlined key="models" />],
     workbench: ['智能体协作工作台', <TeamOutlined key="workbench" />],
   }[selectedKey]
@@ -857,13 +950,17 @@ function AppLayout() {
           </Space>
         </Header>
         <Content className="app-content">
-          <Routes>
-            <Route path="/workbench" element={<WorkbenchPage />} />
-            <Route path="/audit" element={<AuditPage />} />
-            <Route path="/audit/:flowId" element={<AuditPage />} />
-            <Route path="/models" element={<ModelUsagePage />} />
-            <Route path="*" element={<Navigate to="/workbench" replace />} />
-          </Routes>
+          <Suspense fallback={<div className="center-state"><Spin /></div>}>
+            <Routes>
+              <Route path="/workbench" element={<WorkbenchPage />} />
+              <Route path="/audit" element={<AuditPage />} />
+              <Route path="/audit/:flowId" element={<AuditPage />} />
+              <Route path="/prompts" element={<PromptManagementPage />} />
+              <Route path="/mcp" element={<McpManagementPage />} />
+              <Route path="/models" element={<ModelUsagePage />} />
+              <Route path="*" element={<Navigate to="/workbench" replace />} />
+            </Routes>
+          </Suspense>
         </Content>
       </Layout>
     </Layout>

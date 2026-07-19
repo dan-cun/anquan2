@@ -1,4 +1,6 @@
-const featureRoute = /^\/(workbench|audit|models)(?:\/|$)/.test(window.location.pathname)
+import { isFeatureRoute } from './app/featureRoutes.js'
+
+const featureRoute = isFeatureRoute(window.location.pathname)
 
 function finishRouteTransition() {
   window.requestAnimationFrame(() => {

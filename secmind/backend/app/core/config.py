@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     rate_limit_requests: int = Field(default=120, ge=1)
     rate_limit_window_seconds: int = Field(default=60, ge=1)
     websocket_idle_timeout_seconds: int = Field(default=300, ge=10, le=7200)
+    graphql_path: str = "/graphql"
+    graphql_subscription_keepalive_seconds: int = Field(default=20, ge=5, le=300)
 
     data_dir: Path = Path("./data")
     ledger_dir: Path | None = None
@@ -52,6 +54,18 @@ class Settings(BaseSettings):
     projection_enabled: bool = False
     projection_batch_size: int = Field(default=500, ge=1, le=10_000)
     projection_rebuild_on_start: bool = False
+
+    agent_max_parallel: int = Field(default=8, ge=1, le=128)
+    agent_max_delegation_depth: int = Field(default=12, ge=1, le=100)
+
+    mcp_config_file: Path | None = None
+    mcp_connect_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    mcp_call_timeout_seconds: float = Field(default=300.0, gt=0, le=7200)
+    mcp_refresh_interval_seconds: float = Field(default=60.0, gt=0, le=86_400)
+
+    prompt_override_dir: Path | None = None
+    prompt_workbook_path: Path | None = None
+    prompt_auto_reload: bool = False
 
     llm_provider: str = "null"
     llm_api_key: SecretStr | None = None
@@ -137,6 +151,14 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_qdrant_url(cls, value: Any) -> str:
         return str(value).strip().rstrip("/")
+
+    @field_validator("graphql_path", mode="before")
+    @classmethod
+    def normalize_graphql_path(cls, value: Any) -> str:
+        normalized = f"/{str(value or 'graphql').strip().strip('/')}"
+        if normalized == "/":
+            raise ValueError("graphql_path must not be the root path")
+        return normalized
 
     @property
     def resolved_api_key(self) -> str | None:

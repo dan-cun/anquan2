@@ -50,6 +50,11 @@ def test_runtime_event_contract_covers_graph_and_flow_events() -> None:
         "step.denied",
         "step.selection_complete",
         "tool.replayed",
+        "agent.delegated",
+        "agent.message",
+        "mcp.capabilities_updated",
+        "plan.revised",
+        "prompt.imported",
     }
 
     assert required <= {event.value for event in RuntimeEventType}
@@ -85,6 +90,9 @@ def test_preferred_database_and_model_configuration(tmp_path, monkeypatch) -> No
         llm_model="qwen-plus",
         llm_planner_model="qwen-max",
         qdrant_api_key_file=key_file,
+        graphql_path="graphql/",
+        agent_max_parallel=16,
+        mcp_config_file=tmp_path / "mcp.json",
     )
 
     assert settings.resolved_database_url == "sqlite:///preferred.db"
@@ -93,3 +101,6 @@ def test_preferred_database_and_model_configuration(tmp_path, monkeypatch) -> No
     assert settings.resolved_llm_planner_model == "qwen-max"
     assert settings.resolved_llm_worker_model == "qwen-plus"
     assert settings.resolved_qdrant_api_key == "secret-value"
+    assert settings.graphql_path == "/graphql"
+    assert settings.agent_max_parallel == 16
+    assert settings.mcp_config_file == tmp_path / "mcp.json"
