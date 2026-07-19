@@ -6,6 +6,7 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+from app.database import models as _native_models  # noqa: F401
 from ledger.projections import ProjectionRunRow  # noqa: F401
 from ledger.runtime_store import Base
 
@@ -13,9 +14,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.getenv("SECMIND_DATABASE_URL") or os.getenv(
-    "SECMIND_RUNTIME_DATABASE_URL"
-)
+database_url = os.getenv("SECMIND_DATABASE_URL") or os.getenv("SECMIND_RUNTIME_DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
