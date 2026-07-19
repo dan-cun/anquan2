@@ -1,0 +1,548 @@
+scalar DateTime
+scalar JSON
+
+enum AgentRole {
+  PRIMARY_AGENT
+  ASSISTANT
+  GENERATOR
+  REFINER
+  ADVISER
+  REFLECTOR
+  SEARCHER
+  ENRICHER
+  CODER
+  INSTALLER
+  PENTESTER
+  MEMORIST
+  REPORTER
+  SUMMARIZER
+  TOOLCALL_FIXER
+}
+
+enum AgentStatus {
+  CREATED
+  RUNNING
+  WAITING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AgentMessageKind {
+  DELEGATION
+  REQUEST
+  RESPONSE
+  STATUS
+  REFLECTION
+  ERROR
+}
+
+enum MCPTransport {
+  STDIO
+  STREAMABLE_HTTP
+  SSE
+}
+
+enum MCPServerStatus {
+  DISCONNECTED
+  CONNECTING
+  CONNECTED
+  DEGRADED
+  FAILED
+}
+
+enum CapabilityKind {
+  TOOL
+  RESOURCE
+  PROMPT
+}
+
+enum ToolOrigin {
+  NATIVE
+  MCP
+}
+
+enum ToolExecutionStatus {
+  CREATED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum PromptMessageRole {
+  SYSTEM
+  USER
+  TEMPLATE
+  MEMORY
+}
+
+enum PromptVersionStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+type Flow {
+  id: ID!
+  title: String!
+  status: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  tasks: [Task!]!
+}
+
+type Task {
+  id: ID!
+  flowId: ID!
+  title: String!
+  objective: String!
+  status: String!
+  result: JSON
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  subtasks: [Subtask!]!
+}
+
+type Subtask {
+  id: ID!
+  taskId: ID!
+  title: String!
+  description: String!
+  status: String!
+  agentRole: AgentRole
+  result: JSON
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Assistant {
+  id: ID!
+  flowId: ID!
+  title: String!
+  status: String!
+  useAgents: Boolean!
+  modelProvider: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type AgentDescriptor {
+  role: AgentRole!
+  displayName: String!
+  description: String!
+  promptKey: String!
+  modelProfile: String!
+  capabilities: [String!]!
+  enabled: Boolean!
+  metadata: JSON!
+}
+
+type AgentInstance {
+  instanceId: ID!
+  runId: ID!
+  flowId: ID!
+  role: AgentRole!
+  status: AgentStatus!
+  taskId: ID
+  parentInstanceId: ID
+  promptVersionId: ID
+  modelProfile: String!
+  startedAt: DateTime
+  updatedAt: DateTime!
+  completedAt: DateTime
+  metadata: JSON!
+}
+
+type AgentTask {
+  taskId: ID!
+  runId: ID!
+  flowId: ID!
+  subtaskId: ID
+  parentAgentInstanceId: ID
+  objective: String!
+  contextRefs: [String!]!
+  constraints: [String!]!
+  expectedOutputs: [String!]!
+  metadata: JSON!
+}
+
+type AgentDelegation {
+  delegationId: ID!
+  runId: ID!
+  flowId: ID!
+  fromAgentInstanceId: ID!
+  toRole: AgentRole!
+  toAgentInstanceId: ID
+  task: AgentTask!
+  status: AgentStatus!
+  resultSummary: String
+  createdAt: DateTime!
+  completedAt: DateTime
+}
+
+type AgentMessage {
+  messageId: ID!
+  runId: ID!
+  flowId: ID!
+  fromAgentInstanceId: ID!
+  toAgentInstanceId: ID
+  toRole: AgentRole
+  kind: AgentMessageKind!
+  summary: String!
+  payloadRef: String
+  sequence: Int
+  timestamp: DateTime!
+  metadata: JSON!
+}
+
+type AgentResult {
+  agentInstanceId: ID!
+  taskId: ID!
+  status: AgentStatus!
+  summary: String!
+  data: JSON!
+  artifactRefs: [String!]!
+  evidenceIds: [ID!]!
+  findingIds: [ID!]!
+  errorCode: String
+  errorMessage: String
+  startedAt: DateTime
+  completedAt: DateTime!
+}
+
+type MCPServer {
+  serverId: ID!
+  name: String!
+  transport: MCPTransport!
+  enabled: Boolean!
+  status: MCPServerStatus!
+  protocolVersion: String
+  errorMessage: String
+  metadata: JSON!
+  capabilities: [MCPCapability!]!
+}
+
+type MCPCapability {
+  capabilityId: ID!
+  serverId: ID!
+  kind: CapabilityKind!
+  name: String!
+  description: String!
+  inputSchema: JSON!
+  metadata: JSON!
+}
+
+type UnifiedTool {
+  toolId: ID!
+  name: String!
+  description: String!
+  origin: ToolOrigin!
+  inputSchema: JSON!
+  outputSchema: JSON!
+  serverId: ID
+  annotations: JSON!
+}
+
+type ToolCall {
+  invocationId: ID!
+  runId: ID!
+  flowId: ID!
+  agentInstanceId: ID!
+  taskId: ID
+  subtaskId: ID
+  toolId: ID!
+  arguments: JSON!
+  status: ToolExecutionStatus!
+  text: String!
+  data: JSON!
+  artifactRefs: [String!]!
+  evidenceIds: [ID!]!
+  errorCode: String
+  errorMessage: String
+  durationMs: Int!
+}
+
+type MessageChain {
+  chainId: ID!
+  runId: ID!
+  flowId: ID!
+  taskId: ID
+  subtaskId: ID
+  agentInstanceId: ID!
+  agentRole: AgentRole!
+  modelProvider: String!
+  model: String!
+  summary: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  entries: [MessageEntry!]!
+}
+
+type MessageEntry {
+  entryId: ID!
+  chainId: ID!
+  role: String!
+  content: String!
+  contentData: JSON
+  toolCallId: ID
+  sequence: Int!
+  createdAt: DateTime!
+}
+
+type PromptTemplate {
+  promptKey: ID!
+  name: String!
+  category: String!
+  messageRole: PromptMessageRole!
+  agentRole: AgentRole
+  sourcePath: String
+  variables: [String!]!
+  activeVersionId: ID
+  metadata: JSON!
+  versions: [PromptVersion!]!
+}
+
+type PromptVersion {
+  versionId: ID!
+  promptKey: ID!
+  version: Int!
+  content: String!
+  variables: [String!]!
+  checksum: String!
+  status: PromptVersionStatus!
+  source: String!
+  createdAt: DateTime!
+  activatedAt: DateTime
+}
+
+type Approval {
+  requestId: ID!
+  runId: ID!
+  stepId: ID!
+  status: String!
+  reason: String!
+  decision: String
+  actor: String
+  requestedAt: DateTime!
+  resolvedAt: DateTime
+}
+
+type RuntimeEvent {
+  eventId: ID!
+  runId: ID!
+  sequence: Int!
+  eventType: String!
+  actor: String!
+  payload: JSON!
+  timestamp: DateTime!
+  prevHash: String!
+  hash: String!
+}
+
+type Report {
+  runId: ID!
+  status: String!
+  executiveSummary: String!
+  findings: JSON!
+  evidence: JSON!
+  limitations: [String!]!
+  generatedAt: DateTime!
+}
+
+type Artifact {
+  artifactId: ID!
+  runId: ID!
+  flowId: ID!
+  name: String!
+  mediaType: String!
+  uri: String!
+  sha256: String
+  sizeBytes: Int
+  metadata: JSON!
+  createdAt: DateTime!
+}
+
+type Evidence {
+  evidenceId: ID!
+  runId: ID!
+  source: String!
+  summary: String!
+  artifactRef: ID
+  sha256: String
+  metadata: JSON!
+  createdAt: DateTime!
+}
+
+type Finding {
+  findingId: ID!
+  runId: ID!
+  subtaskId: ID
+  ruleId: String!
+  severity: String!
+  confidence: String!
+  path: String!
+  line: Int
+  title: String!
+  description: String!
+  remediation: String
+  evidenceIds: [ID!]!
+  raw: JSON!
+  createdAt: DateTime!
+}
+
+type UsageStats {
+  requestCount: Int!
+  promptTokens: Int!
+  completionTokens: Int!
+  totalTokens: Int!
+  estimatedCost: Float
+}
+
+input CreateFlowInput {
+  title: String
+  input: String!
+  modelProvider: String
+  resourceIds: [ID!]
+}
+
+input SubmitFlowInput {
+  content: String!
+  metadata: JSON
+}
+
+input CreateAssistantInput {
+  title: String
+  input: String!
+  useAgents: Boolean = true
+  modelProvider: String
+  resourceIds: [ID!]
+}
+
+input RegisterMCPServerInput {
+  serverId: ID!
+  name: String!
+  transport: MCPTransport!
+  command: String
+  args: [String!]
+  cwd: String
+  envRefs: JSON
+  url: String
+  headerRefs: JSON
+  enabled: Boolean = true
+  metadata: JSON
+}
+
+input UpdateMCPServerInput {
+  name: String
+  command: String
+  args: [String!]
+  cwd: String
+  envRefs: JSON
+  url: String
+  headerRefs: JSON
+  enabled: Boolean
+  metadata: JSON
+}
+
+input CreatePromptVersionInput {
+  promptKey: ID!
+  content: String!
+  source: String = "graphql"
+}
+
+input DelegateAgentInput {
+  flowId: ID!
+  runId: ID!
+  fromAgentInstanceId: ID!
+  toRole: AgentRole!
+  objective: String!
+  subtaskId: ID
+  contextRefs: [String!]
+  constraints: [String!]
+  expectedOutputs: [String!]
+  metadata: JSON
+}
+
+input RevisePlanInput {
+  runId: ID!
+  taskId: ID!
+  revision: JSON!
+  reason: String!
+}
+
+type Query {
+  flows: [Flow!]!
+  flow(flowId: ID!): Flow!
+  tasks(flowId: ID!): [Task!]!
+  subtasks(taskId: ID!): [Subtask!]!
+  assistants(flowId: ID!): [Assistant!]!
+  agentDescriptors: [AgentDescriptor!]!
+  agentInstances(flowId: ID!, runId: ID): [AgentInstance!]!
+  agentDelegations(flowId: ID!, runId: ID): [AgentDelegation!]!
+  agentMessages(flowId: ID!, afterSequence: Int = 0): [AgentMessage!]!
+  tools: [UnifiedTool!]!
+  toolCalls(flowId: ID!, agentInstanceId: ID): [ToolCall!]!
+  messageChains(flowId: ID!, agentInstanceId: ID): [MessageChain!]!
+  mcpServers: [MCPServer!]!
+  mcpCapabilities(serverId: ID, kind: CapabilityKind): [MCPCapability!]!
+  prompts: [PromptTemplate!]!
+  prompt(promptKey: ID!): PromptTemplate!
+  approvals(runId: ID!): [Approval!]!
+  runtimeEvents(runId: ID!, afterSequence: Int = 0): [RuntimeEvent!]!
+  report(runId: ID!): Report
+  artifacts(runId: ID!): [Artifact!]!
+  evidence(runId: ID!): [Evidence!]!
+  findings(runId: ID!): [Finding!]!
+  usageByFlow(flowId: ID!): UsageStats!
+  usageByAgent(flowId: ID!): JSON!
+  usageByModel(flowId: ID): JSON!
+  usageByTool(flowId: ID): JSON!
+}
+
+type Mutation {
+  createFlow(input: CreateFlowInput!): Flow!
+  submitFlowInput(flowId: ID!, input: SubmitFlowInput!): Flow!
+  stopFlow(flowId: ID!, reason: String): Flow!
+  finishFlow(flowId: ID!): Flow!
+  deleteFlow(flowId: ID!): Boolean!
+  renameFlow(flowId: ID!, title: String!): Flow!
+  createAssistant(flowId: ID!, input: CreateAssistantInput!): Assistant!
+  callAssistant(flowId: ID!, assistantId: ID!, input: String!, useAgents: Boolean = true): Assistant!
+  stopAssistant(flowId: ID!, assistantId: ID!): Assistant!
+  deleteAssistant(flowId: ID!, assistantId: ID!): Boolean!
+  approveAction(runId: ID!, requestId: ID!, reason: String): Approval!
+  rejectAction(runId: ID!, requestId: ID!, reason: String): Approval!
+  retrySubtask(subtaskId: ID!): Subtask!
+  revisePlan(input: RevisePlanInput!): Task!
+  delegateAgent(input: DelegateAgentInput!): AgentDelegation!
+  registerMCPServer(input: RegisterMCPServerInput!): MCPServer!
+  updateMCPServer(serverId: ID!, input: UpdateMCPServerInput!): MCPServer!
+  removeMCPServer(serverId: ID!): Boolean!
+  refreshMCPCapabilities(serverId: ID): [MCPServer!]!
+  createPromptVersion(input: CreatePromptVersionInput!): PromptVersion!
+  enablePromptVersion(promptKey: ID!, versionId: ID!): PromptTemplate!
+  importPrompts(workbookRef: String!): [PromptTemplate!]!
+}
+
+type Subscription {
+  flowUpdated(flowId: ID): Flow!
+  taskUpdated(flowId: ID!): Task!
+  subtaskUpdated(flowId: ID!): Subtask!
+  assistantCreated(flowId: ID!): Assistant!
+  assistantUpdated(flowId: ID!): Assistant!
+  assistantDeleted(flowId: ID!): Assistant!
+  agentStarted(flowId: ID!): AgentInstance!
+  agentDelegated(flowId: ID!): AgentDelegation!
+  agentMessageAdded(flowId: ID!): AgentMessage!
+  agentCompleted(flowId: ID!): AgentResult!
+  agentFailed(flowId: ID!): AgentResult!
+  toolCallStarted(flowId: ID!): ToolCall!
+  toolCallUpdated(flowId: ID!): ToolCall!
+  mcpServerUpdated(serverId: ID): MCPServer!
+  mcpCapabilityUpdated(serverId: ID): MCPCapability!
+  approvalRequested(runId: ID!): Approval!
+  runtimeEventAdded(runId: ID!, afterSequence: Int = 0): RuntimeEvent!
+  reportUpdated(runId: ID!): Report!
+}
