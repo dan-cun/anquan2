@@ -9,6 +9,8 @@ from app.api.router import API_CONTRACT_VERSION, api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.security import install_security_middleware
+from app.graphql import create_graphql_router
+from app.graphql.adapters import build_graphql_backend
 from app.schemas.events import WS_PROTOCOL_VERSION
 from app.services.context import open_services
 from app.websocket.manager import ConnectionManager
@@ -55,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "health": "/health",
             "websocket": "/ws/flows/{flow_id}",
             "runtime_events": f"{resolved_settings.api_prefix}/runs/{{run_id}}/events",
+            "graphql": resolved_settings.graphql_path,
         }
 
     @app.get("/health", tags=["health"])
@@ -70,6 +73,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(api_router, prefix=resolved_settings.api_prefix)
     app.include_router(websocket_router)
+    app.include_router(
+        create_graphql_router(
+            lambda connection: build_graphql_backend(connection.app.state.services)
+        ),
+        prefix=resolved_settings.graphql_path,
+    )
     return app
 
 

@@ -338,6 +338,8 @@ class AgentRepository:
         *,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
+        prompt_version_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> AgentInstance:
         with self.sessions.begin() as session:
             row = session.get(AgentInstanceRow, instance_id)
@@ -349,6 +351,10 @@ class AgentRepository:
                 row.started_at = started_at
             if completed_at is not None:
                 row.completed_at = completed_at
+            if prompt_version_id is not None:
+                row.prompt_version_id = prompt_version_id
+            if metadata is not None:
+                row.metadata_json = metadata
         return self._instance_schema(row)
 
     def create_delegation(self, delegation: AgentDelegation) -> AgentDelegation:

@@ -185,6 +185,31 @@ def test_agent_delegation_messages_and_independent_chain(repositories) -> None:
         parent_instance_id=primary.instance_id,
     )
     repositories.agents.create_instance(coder)
+    repositories.prompts.upsert_template(
+        PromptTemplateRecord(
+            prompt_key="coder",
+            name="Coder",
+            category="agent",
+            message_role=PromptMessageRole.SYSTEM,
+        )
+    )
+    prompt_version = repositories.prompts.create_version(
+        PromptVersionRecord(
+            prompt_key="coder",
+            version=1,
+            content="Review code",
+            checksum="prompt-version-checksum",
+            status=PromptVersionStatus.ACTIVE,
+        )
+    )
+    updated_coder = repositories.agents.update_instance_status(
+        coder.instance_id,
+        AgentStatus.COMPLETED,
+        prompt_version_id=prompt_version.version_id,
+        metadata={"chain_id": "chain-coder"},
+    )
+    assert updated_coder.prompt_version_id == prompt_version.version_id
+    assert updated_coder.metadata == {"chain_id": "chain-coder"}
     completed = repositories.agents.complete_delegation(
         delegation.delegation_id,
         status=AgentStatus.COMPLETED,

@@ -1,0 +1,30 @@
+<question_searcher_context>
+  <instruction>
+  以最高效率交付相关信息，按以下优先级使用搜索工具：内部记忆 → 专用工具 → 通用搜索引擎。首先检查已有知识，然后在搜索中使用精确的技术术语。
+
+  {{if .Task}}使用任务上下文（ID {{.Task.ID}}）优化搜索查询，聚焦于相关信息。{{end}}
+  {{if .Subtask}}结合子任务详情（ID {{.Subtask.ID}}）进一步细化搜索范围。{{else}}使用所有子任务搜索相关信息。{{end}}
+
+  将搜索操作限制在最多3-5次。一旦获得足够信息以完整回答查询，立即停止搜索。按相关性组织回答，提供可操作的解决方案，避免不必要的细节。
+  </instruction>
+
+  <user_question>
+  {{.Question}}
+  </user_question>
+
+  {{if .Task}}
+  <current_task>
+  <id>{{.Task.ID}}</id>
+  <status>{{.Task.Status}}</status>
+  <title>{{.Task.Title}}</title>
+  </current_task>
+  {{end}}
+
+  {{if .Subtask}}
+  <current_subtask>
+  <id>{{.Subtask.ID}}</id>
+  <status>{{.Subtask.Status}}</status>
+  <title>{{.Subtask.Title}}</title>
+  </current_subtask>
+  {{end}}
+</question_searcher_context>

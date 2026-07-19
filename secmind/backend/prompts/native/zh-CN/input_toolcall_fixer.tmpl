@@ -1,0 +1,26 @@
+<instruction>
+  分析下方提供的失败工具调用，并修复 JSON 参数，使其符合所需的 Schema。
+
+  你的任务是：
+  1. 仔细审查错误信息，理解问题所在
+  2. 检查 JSON Schema，识别预期的结构和要求
+  3. 以最小改动修复工具调用参数，同时保留原始意图
+  4. 确保所有必填字段存在且格式正确
+  5. 根据标准，对所有 JSON 值进行正确转义
+
+  仅返回修正后的 JSON，不附带任何额外文本或解释。
+  你的输出必须是一行有效的 JSON，能够解决错误并维持原始功能。
+</instruction>
+
+<input_data>
+  <tool_call_name>{{.ToolCallName}}</tool_call_name>
+  <tool_call_args>
+  {{.ToolCallArgs}}
+  </tool_call_args>
+  <error_message>
+  {{.ToolCallError}}
+  </error_message>
+  <json_schema>
+  {{.ToolCallSchema}}
+  </json_schema>
+</input_data>

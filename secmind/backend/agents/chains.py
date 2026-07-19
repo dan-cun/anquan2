@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
@@ -22,10 +23,13 @@ class AgentMessageChain:
     messages: list[LLMMessage] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    on_append: Callable[[LLMMessage, int], None] | None = field(default=None, repr=False)
 
     def append(self, role: str, content: str, **metadata: object) -> LLMMessage:
         message = LLMMessage(role=role, content=content, metadata=dict(metadata))
         self.messages.append(message)
+        if self.on_append is not None:
+            self.on_append(message, len(self.messages))
         self.updated_at = datetime.now(UTC)
         return message
 

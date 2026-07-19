@@ -67,6 +67,18 @@ class AgentDispatcher:
     async def dispatch_root(self, role: AgentRole, task: AgentTask) -> AgentResult:
         return await self._dispatch(role, task, parent_instance_id=None, depth=0)
 
+    async def delegate_from(
+        self,
+        parent_instance_id: str,
+        role: AgentRole,
+        task: AgentTask,
+    ) -> AgentResult:
+        parent = self._instances.get(parent_instance_id)
+        if parent is None:
+            raise KeyError(parent_instance_id)
+        depth = int(parent.metadata.get("delegation_depth", 0)) + 1
+        return await self._delegate(parent, role, task, depth=depth)
+
     async def dispatch_many(
         self,
         assignments: Iterable[tuple[AgentRole, AgentTask]],
@@ -97,6 +109,9 @@ class AgentDispatcher:
             model_profile=descriptor.model_profile,
             metadata={"delegation_depth": depth},
         )
+        async with self._lock:
+            self._instances[instance.instance_id] = instance
+        await self._publish(RuntimeEventType.AGENT_CREATED, instance.model_dump(mode="json"), role)
         chain = await self.chain_store.create(
             run_id=task.run_id,
             flow_id=task.flow_id,
@@ -104,9 +119,6 @@ class AgentDispatcher:
             agent_role=role,
         )
         instance.metadata["chain_id"] = chain.chain_id
-        async with self._lock:
-            self._instances[instance.instance_id] = instance
-        await self._publish(RuntimeEventType.AGENT_CREATED, instance.model_dump(mode="json"), role)
 
         if depth > self.max_delegation_depth:
             instance.status = AgentStatus.FAILED
@@ -192,9 +204,7 @@ class AgentDispatcher:
             )
 
         terminal_status = (
-            AgentStatus.COMPLETED
-            if result.status == AgentStatus.COMPLETED
-            else AgentStatus.FAILED
+            AgentStatus.COMPLETED if result.status == AgentStatus.COMPLETED else AgentStatus.FAILED
         )
         instance.status = terminal_status
         instance.completed_at = result.completed_at

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, status
 
 from app.schemas.events import WSMessage
@@ -54,12 +56,20 @@ async def submit_message(
     services.flows.update_status(flow.id, FlowStatus.running)
 
     events: list[WSMessage] = []
+    collaboration_task = asyncio.create_task(
+        services.collaboration.submit(
+            flow_id=flow.id,
+            objective=request.content,
+            metadata=request.metadata,
+        )
+    )
     async for event in services.orchestrator.handle_user_message(
         flow_id=flow.id,
         content=request.content,
         metadata=request.metadata,
     ):
         events.append(event)
+    await collaboration_task
 
     interrupted = any(event.type == "server.interrupt" for event in events)
     final_status = FlowStatus.waiting if interrupted else FlowStatus.finished

@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   collaborationState,
+  nativeCollaborationState,
   nodeFromEvent,
   roleForNode,
 } from '../src/app/agentNetwork.js'
@@ -11,6 +12,47 @@ test('maps runtime nodes to collaboration roles', () => {
   assert.equal(roleForNode('plan').id, 'planner')
   assert.equal(roleForNode('verify').id, 'reviewer')
   assert.equal(roleForNode('missing'), null)
+})
+
+test('builds roles and delegation edges from native GraphQL records', () => {
+  const state = nativeCollaborationState({
+    agentDescriptors: [
+      { role: 'ASSISTANT', displayName: 'Assistant', description: '', enabled: true },
+      { role: 'SEARCHER', displayName: 'Searcher', description: '', enabled: true },
+    ],
+    agentInstances: [
+      {
+        instanceId: 'agent-1',
+        role: 'ASSISTANT',
+        status: 'COMPLETED',
+        updatedAt: '2026-07-19T10:00:00Z',
+      },
+      {
+        instanceId: 'agent-2',
+        role: 'SEARCHER',
+        status: 'RUNNING',
+        updatedAt: '2026-07-19T10:00:01Z',
+      },
+    ],
+    agentDelegations: [
+      {
+        delegationId: 'delegation-1',
+        fromAgentInstanceId: 'agent-1',
+        toAgentInstanceId: 'agent-2',
+        toRole: 'SEARCHER',
+        status: 'RUNNING',
+      },
+    ],
+  })
+
+  assert.equal(state.native, true)
+  assert.equal(state.activeRole, 'searcher')
+  assert.deepEqual(state.edges[0], {
+    id: 'delegation-1',
+    from: 'assistant',
+    to: 'searcher',
+    status: 'active',
+  })
 })
 
 test('derives live role status from websocket node events', () => {
@@ -39,4 +81,3 @@ test('marks the orchestrator waiting on an approval interrupt', () => {
   ])
   assert.equal(state.roles.find((item) => item.id === 'orchestrator').status, 'waiting')
 })
-

@@ -33,11 +33,13 @@ flowchart LR
 - PostgreSQL 保存业务事实，LangGraph Checkpoint 保存恢复状态，Qdrant 保存向量知识，三者职责分离。
 - GraphQL 是前端主要业务 API；现有 REST 可保留到前端迁移完成后再下线。
 
-## 3. Prompt 移植
+## 3. Prompt 验证与移植
 
 PentAGI 当前包含 39 个运行 Prompt 和 2 个 Graphiti 记忆模板。Prompt 工作簿是后续修改与导入的唯一交换格式。
 
-工作簿回传后的处理流程：
+当前阶段不修改原始 Prompt。先由 Prompt 评测负责人完成语法基线、行为可行性、科学性和多模型一致性测试；只有候选修订在成对 A/B 测试中优于基线，才进入版本表并由用户确认启用。详细标准见 `docs/prompt-validation-plan.md`。
+
+未来需要修改时的处理流程：
 
 1. 按 `Prompt键` 读取“修改后Prompt”列。
 2. 对比原文，生成修改差异报告。
@@ -45,8 +47,9 @@ PentAGI 当前包含 39 个运行 Prompt 和 2 个 Graphiti 记忆模板。Promp
 4. 将 Go Template 变量转换为 SecMind 的 Jinja2 模板变量。
 5. 对 `if`、`range`、嵌套对象和工具名变量执行转换测试。
 6. 使用固定测试上下文渲染全部 Prompt，禁止出现未解析变量。
-7. 写入 `prompts` 和 `prompt_versions`，保留原始版、修改版、版本号和启用状态。
-8. Agent Registry 从数据库加载启用版本，支持运行时刷新。
+7. 运行基线版与候选版的成对评测，记录完成率、证据准确率、工具调用成功率、Token 和耗时。
+8. 写入 `prompts` 和 `prompt_versions`，保留原始版、候选版、评测报告、版本号和启用状态。
+9. Agent Registry 从数据库加载用户确认启用的版本，支持运行时刷新。
 
 目标目录：
 

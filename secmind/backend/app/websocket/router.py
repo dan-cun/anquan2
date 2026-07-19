@@ -106,6 +106,13 @@ async def flow_websocket(websocket: WebSocket, flow_id: str, after_sequence: int
 
                 services.flows.update_status(flow_id, FlowStatus.running)
                 interrupted = False
+                collaboration_task = asyncio.create_task(
+                    services.collaboration.submit(
+                        flow_id=flow_id,
+                        objective=content,
+                        metadata=message.payload.get("metadata") or {},
+                    )
+                )
                 try:
                     async for event in services.orchestrator.handle_user_message(
                         flow_id=flow_id,
@@ -115,7 +122,10 @@ async def flow_websocket(websocket: WebSocket, flow_id: str, after_sequence: int
                         if event.type == WSServerMessageType.INTERRUPT:
                             interrupted = True
                         await manager.broadcast(flow_id, event)
+                    await collaboration_task
                 except ValidationError as exc:
+                    collaboration_task.cancel()
+                    await asyncio.gather(collaboration_task, return_exceptions=True)
                     services.flows.update_status(flow_id, FlowStatus.failed)
                     logger.info("Flow %s rejected invalid task input", flow_id)
                     services.ledger.append(
@@ -137,6 +147,8 @@ async def flow_websocket(websocket: WebSocket, flow_id: str, after_sequence: int
                     )
                     continue
                 except Exception as exc:
+                    collaboration_task.cancel()
+                    await asyncio.gather(collaboration_task, return_exceptions=True)
                     services.flows.update_status(flow_id, FlowStatus.failed)
                     logger.exception("Flow %s runtime execution failed", flow_id)
                     services.ledger.append(

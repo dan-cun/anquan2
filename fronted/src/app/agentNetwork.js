@@ -129,3 +129,55 @@ export function collaborationState(events = []) {
   return { roles, latestNode, activeRole, completedNodes }
 }
 
+const nativeStatus = {
+  CREATED: 'idle',
+  RUNNING: 'active',
+  WAITING: 'waiting',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  CANCELLED: 'failed',
+}
+
+export function nativeCollaborationState(data) {
+  if (!data?.agentDescriptors?.length) return null
+  const instances = data.agentInstances || []
+  const byRole = new Map()
+  for (const instance of instances) {
+    const current = byRole.get(instance.role)
+    if (!current || String(instance.updatedAt) > String(current.updatedAt)) {
+      byRole.set(instance.role, instance)
+    }
+  }
+  const roles = data.agentDescriptors
+    .filter((descriptor) => descriptor.enabled)
+    .map((descriptor) => {
+      const instance = byRole.get(descriptor.role)
+      const id = descriptor.role.toLowerCase()
+      return {
+        id,
+        graphqlRole: descriptor.role,
+        name: descriptor.displayName,
+        shortName: descriptor.displayName.replace(' Agent', ''),
+        description: descriptor.description,
+        status: instance ? (nativeStatus[instance.status] || 'idle') : 'idle',
+        completedCount: instance?.status === 'COMPLETED' ? 1 : 0,
+        instanceId: instance?.instanceId || null,
+      }
+    })
+  const instanceRole = new Map(instances.map((item) => [item.instanceId, item.role.toLowerCase()]))
+  const edges = (data.agentDelegations || []).map((delegation) => ({
+    id: delegation.delegationId,
+    from: instanceRole.get(delegation.fromAgentInstanceId),
+    to: instanceRole.get(delegation.toAgentInstanceId) || delegation.toRole.toLowerCase(),
+    status: nativeStatus[delegation.status] || 'idle',
+  })).filter((edge) => edge.from && edge.to)
+  const activeRole = roles.find((role) => role.status === 'active')?.id || null
+  return {
+    roles,
+    edges,
+    activeRole,
+    latestNode: null,
+    completedNodes: [],
+    native: true,
+  }
+}

@@ -1,0 +1,23 @@
+<question_reflector_context>
+  <instruction>
+  分析下方以非结构化文本（而非正确工具调用）形式发送的 Agent 消息。
+
+  以发起任务用户的身份回复——直接、简洁、不客套。
+  如果消息中包含问题，请先回答问题，然后引导 Agent 使用正确的工具调用格式。
+
+  重要：明确强调 Agent 必须使用结构化工具调用，而非纯文本（补全模式）回复。
+  解释系统只能处理格式正确的工具调用，非结构化回复会阻塞工作流程。
+  提醒 Agent 要完成任务，必须使用以下工具之一：
+  <barrier_tools>
+    {{range .BarrierToolNames}}
+    <tool>{{.}}</tool>
+    {{end}}
+  </barrier_tools>
+
+  需要纠正的 Agent 消息见下方标签。
+  </instruction>
+
+  <message>
+  {{.Message}}
+  </message>
+</question_reflector_context>

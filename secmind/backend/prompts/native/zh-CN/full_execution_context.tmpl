@@ -1,0 +1,100 @@
+<instructions>
+任务：创建任务执行上下文的简洁摘要，清晰说明当前进度和剩余工作
+
+数据：
+- <global_task> 包含用户的总体目标
+- <current_subtask>（若存在）描述当前正在进行的具体工作
+- <previous_tasks> 和 <completed_subtasks> 显示已完成的工作
+- <planned_subtasks> 显示待办事项中剩余的工作
+
+要求：
+1. 创建一个连贯的叙述，重点说明 <global_task> 和 <current_subtask> 之间的关系
+2. 仅在已完成工作与当前上下文直接相关时才进行描述
+3. 包含建立在当前子任务之上或依赖于当前子任务的计划工作
+4. 保留来自相关任务的关键技术细节、ID、状态和结果
+5. **关键：** 如果 <global_task> 包含用于 OOB 攻击（反向 shell、回调、DNS 外泄）的公共 IP 地址信息，则必须提取并明确包含在摘要中
+6. 优先考虑有助于理解总体任务当前状态的信息
+7. 排除对理解当前进度无贡献的不相关细节
+
+需要保留的关键数据：
+- 为 OOB 攻击提及的公共 IP 地址
+- 外部回调 URL 或端点
+- DNS/HTTP 监听器配置
+- 用于带外利用的任何基础设施细节
+
+格式：
+- 以正在进行工作的描述性摘要形式呈现，而非指令或指南
+- 按时间顺序组织（已完成 → 当前 → 计划）以实现自然递进
+- 使用简洁、中立的语言，客观描述状态
+- 结构化信息以清晰显示任务与子任务之间的关系
+
+该摘要应帮助读者快速理解任务的当前状态、已完成的工作、当前正在进行的工作以及剩余待完成的工作。
+</instructions>
+
+<execution_context>
+<global_task>
+{{.Task.Input}}
+</global_task>
+
+<previous_tasks>
+{{if .Tasks}}
+{{range .Tasks}}
+<task>
+<id>{{.ID}}</id>
+<title>{{.Title}}</title>
+<input>
+{{.Input}}
+</input>
+<status>{{.Status}}</status>
+<result>{{.Result}}</result>
+</task>
+{{end}}
+{{else}}
+<status>无</status>
+<message>客户输入无先前任务，请查看上述全局任务。</message>
+{{end}}
+</previous_tasks>
+
+<completed_subtasks>
+{{if .CompletedSubtasks}}
+{{range .CompletedSubtasks}}
+<subtask>
+<id>{{.ID}}</id>
+<title>{{.Title}}</title>
+<description>{{.Description}}</description>
+<status>{{.Status}}</status>
+<result>{{.Result}}</result>
+</subtask>
+{{end}}
+{{else}}
+<status>无</status>
+<message>客户任务无已完成的子任务，这是待办事项中的第一个子任务。</message>
+{{end}}
+</completed_subtasks>
+
+{{if .Subtask}}
+<current_subtask>
+<id>{{.Subtask.ID}}</id>
+<title>{{.Subtask.Title}}</title>
+<description>{{.Subtask.Description}}</description>
+</current_subtask>
+{{else}}
+<status>无</status>
+<message>此任务当前无正在进行的子任务。请查看下面的计划子任务和上面的已完成子任务。</message>
+{{end}}
+
+<planned_subtasks>
+{{if .PlannedSubtasks}}
+{{range .PlannedSubtasks}}
+<subtask>
+<id>{{.ID}}</id>
+<title>{{.Title}}</title>
+<description>{{.Description}}</description>
+</subtask>
+{{end}}
+{{else}}
+<status>无</status>
+<message>此任务在待办事项中无计划子任务。除当前子任务外，所有子任务均已完成{{if .Subtask}}{{end}}。</message>
+{{end}}
+</planned_subtasks>
+</execution_context>
