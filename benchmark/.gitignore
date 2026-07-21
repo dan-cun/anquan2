@@ -1,3 +1,5 @@
 .state/
+runtime.env
+pentagi.env
 __pycache__/
 *.pyc

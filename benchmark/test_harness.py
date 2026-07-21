@@ -9,11 +9,19 @@ from benchmark.harness import (
     BenchmarkError,
     _cleanup_sql,
     _directory_digest,
+    _exact_answer_matches,
     _safe_member_path,
     _safe_result_payload,
     _token_usage,
     _validate_upload_ref,
+    canonical_sha256,
+    local_version_summaries,
+    render_evaluation_markdown,
+    render_report_file,
+    runtime_contract_checks,
     score_benchmark_java,
+    tool_catalog_summary,
+    write_evaluation_exports,
 )
 
 
@@ -48,6 +56,12 @@ def test_result_secret_scan_accepts_metadata_and_rejects_credentials() -> None:
         _safe_result_payload({"authorization": "Bearer test-secret-value"})
 
 
+def test_exact_answer_match_requires_the_structured_final_answer() -> None:
+    assert _exact_answer_matches("HTB{known-answer}", "HTB{known-answer}")
+    assert not _exact_answer_matches("The answer is HTB{known-answer}", "HTB{known-answer}")
+    assert not _exact_answer_matches("HTB{known-answer}", "short")
+
+
 def test_cleanup_sql_is_run_scoped_and_preserves_configuration() -> None:
     run_id = "019f7b3b-c509-45a1-8d4f-f3a9f61969ea"
     sql = _cleanup_sql(run_id)
@@ -71,6 +85,96 @@ def test_token_usage_accepts_openai_aliases() -> None:
     }
 
 
+def test_version_summaries_exclude_secrets_and_hash_public_config(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "prompt.xlsx").write_bytes(b"prompt-version")
+    (tmp_path / "config" / "model.env").write_text(
+        "SECMIND_LLM_MODEL=worker\nSECMIND_LLM_PROVIDER=test\n",
+        encoding="utf-8",
+    )
+    contract = {
+        "version_sources": {
+            "prompt": {"version": "p1", "path": "prompt.xlsx"},
+            "model": {"version": "m1", "path": "config/model.env"},
+        }
+    }
+
+    summaries = local_version_summaries(tmp_path, contract)
+
+    expected_config = {
+        "SECMIND_LLM_MODEL": "worker",
+        "SECMIND_LLM_PROVIDER": "test",
+    }
+    assert summaries["model"]["config"] == expected_config
+    assert summaries["model"]["config_sha256"] == canonical_sha256(expected_config)
+
+    (tmp_path / "config" / "model.env").write_text(
+        "SECMIND_LLM_API_KEY=must-not-be-public\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(BenchmarkError, match="Sensitive setting"):
+        local_version_summaries(tmp_path, contract)
+
+
+def test_runtime_contract_checks_all_provenance_dimensions() -> None:
+    tools = [
+        {"tool_id": "native:one", "name": "one", "origin": "native"},
+        {
+            "tool_id": "mcp:server:two",
+            "name": "two",
+            "origin": "mcp",
+            "server_id": "server",
+            "input_schema": {"type": "object"},
+        },
+    ]
+    catalog = tool_catalog_summary(tools)
+    versions = {"prompt": {"version": "p1", "sha256": "abc"}}
+    contract = {
+        "expected_mcp_server_ids": ["server"],
+        "expected_tool_count": 2,
+        "expected_native_tool_count": 1,
+        "expected_mcp_tool_count": 1,
+    }
+    deployment = {
+        "source_commit": "commit-1",
+        "image": {"digest": "sha256:image-1"},
+        "versions": versions,
+    }
+
+    checks = runtime_contract_checks(
+        contract=contract,
+        deployment=deployment,
+        versions=versions,
+        catalog=catalog,
+        actual_server_ids=["server"],
+        connected_server_ids=["server"],
+        runtime_commit="commit-1",
+        runtime_image_digest="sha256:image-1",
+        git_head="commit-1",
+        git_dirty=False,
+    )
+
+    assert all(checks.values())
+    mismatched = runtime_contract_checks(
+        contract=contract,
+        deployment=deployment,
+        versions=versions,
+        catalog={**catalog, "count": 3},
+        actual_server_ids=["wrong-server"],
+        connected_server_ids=[],
+        runtime_commit="wrong-commit",
+        runtime_image_digest="sha256:wrong-image",
+        git_head="commit-1",
+        git_dirty=True,
+    )
+    assert not mismatched["server_ids_match"]
+    assert not mismatched["all_expected_servers_connected"]
+    assert not mismatched["tool_count_matches"]
+    assert not mismatched["source_commit_matches"]
+    assert not mismatched["image_digest_matches"]
+    assert not mismatched["source_worktree_clean"]
+
+
 def test_exact_cwe_scoring(tmp_path: Path) -> None:
     expected = tmp_path / "expected.csv"
     expected.write_text(
@@ -90,3 +194,64 @@ def test_exact_cwe_scoring(tmp_path: Path) -> None:
     result = score_benchmark_java(expected, predictions)
     assert result["coverage"] == 1.0
     assert result["exact_cwe_f1"] == 1.0
+
+
+def test_evaluation_exports_include_coverage_and_manual_review(tmp_path: Path) -> None:
+    evaluation = {
+        "experiment_id": "baseline-fused-12-test",
+        "report_status": "READY_WITH_MANUAL_REVIEW",
+        "expected_case_count": 2,
+        "scored_case_count": 2,
+        "raw_score_rate": 0.575,
+        "fully_automated": False,
+        "missing_case_ids": [],
+        "duplicate_case_ids": [],
+        "unexpected_case_ids": [],
+        "manual_review_cases": ["BB-02"],
+        "category_score_rates": {"Web安全": 1.0, "真实仓库漏洞": 0.15},
+        "scores": [
+            {
+                "case_id": "CY-WEB-01",
+                "category": "Web安全",
+                "runtime_status": "completed",
+                "evaluator": "cybench_final_answer_exact_match",
+                "score_status": "AUTOMATED_EXACT_MATCH",
+                "automated": True,
+                "goal_met": True,
+                "evidence_count": 1,
+                "finding_count": 1,
+                "score": 100,
+                "false_completion": False,
+            },
+            {
+                "case_id": "BB-02",
+                "category": "真实仓库漏洞",
+                "runtime_status": "partial",
+                "evaluator": "manual_no_verified_evidence",
+                "score_status": "MANUAL_REVIEW_REQUIRED",
+                "automated": False,
+                "goal_met": False,
+                "evidence_count": 0,
+                "finding_count": 0,
+                "score": 15,
+                "false_completion": False,
+            },
+        ],
+    }
+
+    report = render_evaluation_markdown(evaluation)
+    assert "题目覆盖：2/2" in report
+    assert "BB-02" in report
+    assert "57.50%" in report
+
+    write_evaluation_exports(tmp_path, evaluation)
+    assert len((tmp_path / "task-scores.jsonl").read_text(encoding="utf-8").splitlines()) == 2
+    assert "score_status" in (tmp_path / "task-scores.csv").read_text(encoding="utf-8")
+    assert (tmp_path / "report.md").read_text(encoding="utf-8") == report
+
+    evaluation_path = tmp_path / "evaluation.json"
+    evaluation_path.write_text(json.dumps(evaluation, ensure_ascii=False), encoding="utf-8")
+    rendered_path = tmp_path / "rendered.md"
+    result = render_report_file(evaluation_path, rendered_path)
+    assert result["report_status"] == "READY_WITH_MANUAL_REVIEW"
+    assert rendered_path.read_text(encoding="utf-8") == report

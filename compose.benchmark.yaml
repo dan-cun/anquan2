@@ -5,7 +5,14 @@ services:
     build:
       context: ./secmind/backend
       dockerfile: ../../docker/backend.Dockerfile
-    image: secmind-backend:benchmark-current
+      args:
+        SECMIND_SOURCE_COMMIT: ${SECMIND_SOURCE_COMMIT:-unknown}
+    image: ${SECMIND_BACKEND_IMAGE:-secmind-backend:benchmark-current}
+    env_file:
+      - path: ./benchmark/runtime.env
+        required: false
+      - path: ./config/model-public.env
+        required: true
     environment:
       SECMIND_APP_ENV: benchmark
       SECMIND_LOG_LEVEL: ${SECMIND_BENCHMARK_LOG_LEVEL:-INFO}
@@ -18,22 +25,27 @@ services:
       SECMIND_RUNTIME_INPUT_ROOT: /app/data/inputs
       SECMIND_RUNTIME_UPLOAD_ROOT: /app/data/uploads
       SECMIND_RUNTIME_RUN_ROOT: /app/data/runs
-      SECMIND_RUNTIME_DEMO_MODE: ${SECMIND_BENCHMARK_RUNTIME_DEMO_MODE:-true}
+      SECMIND_RUNTIME_DEMO_MODE: ${SECMIND_BENCHMARK_RUNTIME_DEMO_MODE:-false}
       SECMIND_RUNTIME_MAX_UPLOAD_BYTES: ${SECMIND_BENCHMARK_MAX_UPLOAD_BYTES:-104857600}
       SECMIND_RUNTIME_MAX_EXTRACTED_BYTES: ${SECMIND_BENCHMARK_MAX_EXTRACTED_BYTES:-524288000}
       SECMIND_RUNTIME_MAX_FILES: ${SECMIND_BENCHMARK_MAX_FILES:-20000}
       SECMIND_PROMPT_WORKBOOK_PATH: /app/config/native-prompts.xlsx
       SECMIND_QDRANT_ENABLED: "false"
       SECMIND_RATE_LIMIT_ENABLED: "false"
-      SECMIND_LLM_PROVIDER: ${SECMIND_BENCHMARK_LLM_PROVIDER:-null}
-      SECMIND_LLM_API_KEY: ${SECMIND_BENCHMARK_LLM_API_KEY:-}
-      SECMIND_LLM_BASE_URL: ${SECMIND_BENCHMARK_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
-      SECMIND_LLM_MODEL: ${SECMIND_BENCHMARK_LLM_MODEL:-qwen-plus}
+      SECMIND_MCP_CONFIG_FILE: /app/config/mcp-servers.json
+      SECMIND_MCP_CONNECT_TIMEOUT_SECONDS: ${SECMIND_BENCHMARK_MCP_CONNECT_TIMEOUT_SECONDS:-30}
+      SECMIND_MCP_CALL_TIMEOUT_SECONDS: ${SECMIND_BENCHMARK_MCP_CALL_TIMEOUT_SECONDS:-300}
+      SECMIND_MCP_REFRESH_INTERVAL_SECONDS: ${SECMIND_BENCHMARK_MCP_REFRESH_INTERVAL_SECONDS:-60}
+      SECMIND_SOURCE_COMMIT: ${SECMIND_SOURCE_COMMIT:-unknown}
+      SECMIND_IMAGE_DIGEST: ${SECMIND_IMAGE_DIGEST:-unknown}
     ports:
       - "127.0.0.1:${SECMIND_BENCHMARK_BACKEND_PORT:-18100}:8000"
     volumes:
       - benchmark_data:/app/data
       - ./outputs/019f783d-d94a-7f22-8a31-533c5bdca81e/PentAGI原生Prompt中英对比版.xlsx:/app/config/native-prompts.xlsx:ro
+      - ./config/mcp-servers.json:/app/config/mcp-servers.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777

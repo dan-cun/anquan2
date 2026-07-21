@@ -14,4 +14,7 @@ def test_info(client):
     assert {"key": "workbench", "path": "/workbench", "status": "reserved"} in payload[
         "featurePages"
     ]
-
+    assert payload["extensions"]["build"] == {
+        "sourceCommit": "unknown",
+        "imageDigest": "unknown",
+    }

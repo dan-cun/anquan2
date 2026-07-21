@@ -16,12 +16,13 @@ from app.schemas.agents import (
     AgentStatus,
     AgentTask,
 )
-from app.schemas.tools import UnifiedToolInvocation, UnifiedToolResult
-from llm.base import LLMProvider
+from app.schemas.tools import UnifiedToolDefinition, UnifiedToolInvocation, UnifiedToolResult
+from llm.base import LLMMessage, LLMProvider
 
 from .actions import ACTION_PROTOCOL, AgentActionError, AgentActionType, parse_agent_action
 from .chains import AgentMessageChain
 from .loop_guard import AgentLoopGuard, LoopGuardConfig
+from .tool_catalog import render_tool_catalog
 
 
 class PromptResolver(Protocol):
@@ -33,11 +34,14 @@ class PromptResolver(Protocol):
 
 
 class ToolGateway(Protocol):
+    def definitions(self) -> list[UnifiedToolDefinition]: ...
+
     async def invoke(self, invocation: UnifiedToolInvocation) -> UnifiedToolResult: ...
 
 
 DelegateCallback = Callable[[AgentRole, AgentTask], Awaitable[AgentResult]]
 ToolCallback = Callable[[str, dict[str, Any]], Awaitable[UnifiedToolResult]]
+ToolCatalogCallback = Callable[[], list[UnifiedToolDefinition]]
 MessageCallback = Callable[
     [str, str, AgentMessageKind, dict[str, Any]], Awaitable[AgentMessage]
 ]
@@ -81,6 +85,7 @@ class AgentRunContext:
     wait_message_callback: WaitMessageCallback
     stop_requested_callback: StopRequestedCallback
     runtime_event_callback: RuntimeEventCallback
+    tool_catalog_callback: ToolCatalogCallback = field(default_factory=lambda: lambda: [])
     child_results: list[AgentResult] = field(default_factory=list)
     tool_results: list[UnifiedToolResult] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
@@ -161,6 +166,9 @@ class AgentRunContext:
     ) -> None:
         await self.runtime_event_callback(event_type, payload)
 
+    def tool_catalog(self) -> list[UnifiedToolDefinition]:
+        return [item.model_copy(deep=True) for item in self.tool_catalog_callback()]
+
 
 class NativeAgent(ABC):
     descriptor: AgentDescriptor
@@ -237,8 +245,25 @@ class ModelNativeAgent(NativeAgent):
         for iteration in range(1, self.max_iterations + 1):
             if context.stop_requested():
                 return self._cancelled(context)
+            catalog_text, catalog_digest = render_tool_catalog(
+                self.descriptor,
+                context.tool_catalog(),
+            )
+            request_messages = list(context.chain.messages)
+            request_messages.insert(
+                1,
+                LLMMessage(
+                    role="system",
+                    content=catalog_text,
+                    metadata={
+                        "context_kind": "runtime_tool_catalog",
+                        "agent_role": self.descriptor.role.value,
+                        "catalog_sha256": catalog_digest,
+                    },
+                ),
+            )
             response = await self.model.complete(
-                list(context.chain.messages),
+                request_messages,
                 stage=f"agent.{self.descriptor.role.value}",
                 model_profile=self.descriptor.model_profile,
                 run_id=context.task.run_id,

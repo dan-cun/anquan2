@@ -57,6 +57,17 @@ class StableToolGateway:
     def __init__(self) -> None:
         self.calls: list[UnifiedToolInvocation] = []
 
+    def definitions(self) -> list[UnifiedToolDefinition]:
+        return [
+            UnifiedToolDefinition(
+                tool_id="native:test",
+                name="test",
+                origin=ToolOrigin.NATIVE,
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+            )
+        ]
+
     async def invoke(self, call: UnifiedToolInvocation) -> UnifiedToolResult:
         self.calls.append(call)
         mode = str(call.arguments.get("mode") or "same")

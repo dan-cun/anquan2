@@ -14,6 +14,8 @@ from app.schemas.agents import AgentMessageKind, AgentRole, AgentStatus, AgentTa
 from app.schemas.runtime import EventContext
 from app.schemas.tools import (
     ToolExecutionStatus,
+    ToolOrigin,
+    UnifiedToolDefinition,
     UnifiedToolInvocation,
     UnifiedToolResult,
 )
@@ -49,6 +51,22 @@ class RecordingGateway:
     def __init__(self) -> None:
         self.invocations: list[UnifiedToolInvocation] = []
 
+    def definitions(self) -> list[UnifiedToolDefinition]:
+        return [
+            UnifiedToolDefinition(
+                tool_id="native:code_scan",
+                name="code_scan",
+                description="Inspect source code",
+                origin=ToolOrigin.NATIVE,
+                input_schema={
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
+                },
+                output_schema={"type": "object"},
+            )
+        ]
+
     async def invoke(self, invocation: UnifiedToolInvocation) -> UnifiedToolResult:
         self.invocations.append(invocation)
         return UnifiedToolResult(
@@ -58,6 +76,41 @@ class RecordingGateway:
             text="Static analysis completed",
             artifact_refs=["artifact-code-report"],
             evidence_ids=["evidence-code"],
+        )
+
+
+class DynamicCatalogGateway:
+    def __init__(self) -> None:
+        self.invocations: list[UnifiedToolInvocation] = []
+
+    def definitions(self) -> list[UnifiedToolDefinition]:
+        phase = len(self.invocations) + 1
+        return [
+            UnifiedToolDefinition(
+                tool_id="native:dynamic",
+                name="dynamic",
+                description="A dynamically refreshed test tool",
+                origin=ToolOrigin.NATIVE,
+                input_schema={
+                    "type": "object",
+                    "properties": {"phase": {"const": phase}},
+                    "required": ["phase"],
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {"observed_phase": {"type": "integer"}},
+                },
+                annotations={"allowed_roles": ["assistant"]},
+            )
+        ]
+
+    async def invoke(self, invocation: UnifiedToolInvocation) -> UnifiedToolResult:
+        self.invocations.append(invocation)
+        return UnifiedToolResult(
+            invocation_id=invocation.invocation_id,
+            tool_id=invocation.tool_id,
+            status=ToolExecutionStatus.COMPLETED,
+            data={"observed_phase": invocation.arguments["phase"]},
         )
 
 
@@ -100,6 +153,77 @@ def test_registry_contains_every_frozen_native_role() -> None:
         "execute_agent",
         "__end__",
     }
+
+
+@pytest.mark.asyncio
+async def test_role_filtered_tool_catalog_is_refreshed_before_every_model_call() -> None:
+    model = ScriptedModel(
+        {
+            AgentRole.ASSISTANT: [
+                action("tool", tool_id="native:dynamic", arguments={"phase": 1}),
+                action("complete", summary="Dynamic tool completed"),
+            ]
+        }
+    )
+    gateway = DynamicCatalogGateway()
+    dispatcher = AgentDispatcher(
+        registry=build_native_agent_registry(model=model, prompts=StaticPromptResolver()),
+        tool_gateway=gateway,
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.ASSISTANT,
+        AgentTask(run_id="run-catalog", flow_id="flow-catalog", objective="Use the tool"),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    catalogs = [
+        next(
+            message
+            for message in snapshot
+            if message.metadata.get("context_kind") == "runtime_tool_catalog"
+        )
+        for snapshot in model.message_snapshots
+    ]
+    assert len(catalogs) == 2
+    assert '"const":1' in catalogs[0].content
+    assert '"const":2' in catalogs[1].content
+    assert '"output_schema"' in catalogs[0].content
+    assert catalogs[0].metadata["catalog_sha256"] != catalogs[1].metadata["catalog_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_role_without_tool_capability_cannot_invoke_known_tool() -> None:
+    model = ScriptedModel(
+        {
+            AgentRole.GENERATOR: [
+                action("tool", tool_id="native:dynamic", arguments={"phase": 1}),
+                action("complete", summary="Denied tool was not executed"),
+            ]
+        }
+    )
+    gateway = DynamicCatalogGateway()
+    dispatcher = AgentDispatcher(
+        registry=build_native_agent_registry(model=model, prompts=StaticPromptResolver()),
+        tool_gateway=gateway,
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.GENERATOR,
+        AgentTask(run_id="run-denied", flow_id="flow-denied", objective="Generate a plan"),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert gateway.invocations == []
+    second_request = model.message_snapshots[1]
+    observation = next(message for message in second_request if message.role == "tool")
+    assert "TOOL_NOT_ALLOWED_FOR_ROLE" in observation.content
+    catalog = next(
+        message
+        for message in model.message_snapshots[0]
+        if message.metadata.get("context_kind") == "runtime_tool_catalog"
+    )
+    assert '"tools":[]' in catalog.content
 
 
 @pytest.mark.asyncio

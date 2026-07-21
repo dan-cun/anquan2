@@ -25,6 +25,10 @@ async def get_info(
             {"key": "settings", "path": "/settings", "status": "reserved"},
         ],
         "extensions": {
+            "build": {
+                "sourceCommit": settings.source_commit,
+                "imageDigest": settings.image_digest,
+            },
             "tools": [
                 item.model_dump(mode="json") for item in services.tool_gateway.definitions()
             ],

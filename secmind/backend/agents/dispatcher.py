@@ -26,6 +26,7 @@ from app.schemas.runtime import (
 )
 from app.schemas.tools import (
     ToolExecutionStatus,
+    UnifiedToolDefinition,
     UnifiedToolInvocation,
     UnifiedToolResult,
 )
@@ -33,6 +34,7 @@ from app.schemas.tools import (
 from .chains import InMemoryMessageChainStore, MessageChainStore
 from .native import AgentRunContext, ToolGateway
 from .registry import NativeAgentRegistry
+from .tool_catalog import visible_tool_definitions
 
 EventPublisher = Callable[
     [str, dict[str, Any], str, EventContext | None],
@@ -432,6 +434,16 @@ class AgentDispatcher:
         async def delegate(child_role: AgentRole, child_task: AgentTask) -> AgentResult:
             return await self._delegate(instance, child_role, child_task, depth=depth + 1)
 
+        descriptor = self.registry.descriptor(role)
+
+        def role_tool_catalog() -> list[UnifiedToolDefinition]:
+            if self.tool_gateway is None:
+                return []
+            definitions = getattr(self.tool_gateway, "definitions", None)
+            if not callable(definitions):
+                return []
+            return visible_tool_definitions(descriptor, definitions())
+
         async def invoke_tool(tool_id: str, arguments: dict[str, Any]) -> UnifiedToolResult:
             invocation = UnifiedToolInvocation(
                 run_id=task.run_id,
@@ -449,6 +461,23 @@ class AgentDispatcher:
                     status=ToolExecutionStatus.FAILED,
                     error_code="TOOL_GATEWAY_UNAVAILABLE",
                     error_message="No unified tool gateway is configured",
+                )
+            allowed = {item.tool_id for item in role_tool_catalog()}
+            if tool_id not in allowed:
+                definitions = getattr(self.tool_gateway, "definitions", None)
+                known = callable(definitions) and any(
+                    item.tool_id == tool_id for item in definitions()
+                )
+                return UnifiedToolResult(
+                    invocation_id=invocation.invocation_id,
+                    tool_id=tool_id,
+                    status=ToolExecutionStatus.FAILED,
+                    error_code=("TOOL_NOT_ALLOWED_FOR_ROLE" if known else "UNKNOWN_TOOL"),
+                    error_message=(
+                        f"Tool {tool_id} is not authorized for Agent role {role.value}"
+                        if known
+                        else f"Unknown unified tool: {tool_id}"
+                    ),
                 )
             return await self.tool_gateway.invoke(invocation)
 
@@ -508,6 +537,7 @@ class AgentDispatcher:
             wait_message_callback=wait_for_message,
             stop_requested_callback=lambda: instance.instance_id in self._stop_requests,
             runtime_event_callback=publish_runtime_event,
+            tool_catalog_callback=role_tool_catalog,
             long_term_context=(
                 self.context_provider(task.run_id, instance.instance_id)
                 if self.context_provider is not None

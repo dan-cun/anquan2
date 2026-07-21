@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     api_key: SecretStr | None = None
     api_key_file: Path | None = None
     log_level: str = "INFO"
+    source_commit: str = "unknown"
+    image_digest: str = "unknown"
     rate_limit_enabled: bool = True
     rate_limit_requests: int = Field(default=120, ge=1)
     rate_limit_window_seconds: int = Field(default=60, ge=1)

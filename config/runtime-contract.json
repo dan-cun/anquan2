@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "expected_mcp_server_ids": [
+    "local-chrome-devtools",
+    "local-cyberchef",
+    "local-http-fetch",
+    "local-web-security"
+  ],
+  "expected_tool_count": 49,
+  "expected_native_tool_count": 10,
+  "expected_mcp_tool_count": 39,
+  "version_sources": {
+    "prompt": {
+      "version": "native-prompts-2026-07-21",
+      "path": "outputs/019f783d-d94a-7f22-8a31-533c5bdca81e/PentAGI原生Prompt中英对比版.xlsx"
+    },
+    "model": {
+      "version": "deepseek-v4-flash-2026-07-21",
+      "path": "config/model-public.env"
+    },
+    "mcp": {
+      "version": "local-security-mcp-2026-07-21",
+      "path": "config/mcp-servers.json"
+    }
+  }
+}

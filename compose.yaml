@@ -17,6 +17,7 @@ x-backend-environment: &backend-environment
   SECMIND_EVENT_STREAM_POLL_INTERVAL_SECONDS: ${SECMIND_EVENT_STREAM_POLL_INTERVAL_SECONDS:-1.0}
   SECMIND_AGENT_MAX_PARALLEL: ${SECMIND_AGENT_MAX_PARALLEL:-8}
   SECMIND_AGENT_MAX_DELEGATION_DEPTH: ${SECMIND_AGENT_MAX_DELEGATION_DEPTH:-12}
+  SECMIND_MCP_CONFIG_FILE: /app/config/mcp-servers.json
   SECMIND_MCP_CONNECT_TIMEOUT_SECONDS: ${SECMIND_MCP_CONNECT_TIMEOUT_SECONDS:-30}
   SECMIND_MCP_CALL_TIMEOUT_SECONDS: ${SECMIND_MCP_CALL_TIMEOUT_SECONDS:-300}
   SECMIND_MCP_REFRESH_INTERVAL_SECONDS: ${SECMIND_MCP_REFRESH_INTERVAL_SECONDS:-60}
@@ -31,14 +32,9 @@ x-backend-environment: &backend-environment
   SECMIND_RATE_LIMIT_REQUESTS: ${SECMIND_RATE_LIMIT_REQUESTS:-120}
   SECMIND_RATE_LIMIT_WINDOW_SECONDS: ${SECMIND_RATE_LIMIT_WINDOW_SECONDS:-60}
   SECMIND_API_KEY: ${SECMIND_API_KEY:-}
-  SECMIND_LLM_PROVIDER: ${SECMIND_LLM_PROVIDER:-null}
-  SECMIND_LLM_API_KEY: ${SECMIND_LLM_API_KEY:-}
-  SECMIND_LLM_BASE_URL: ${SECMIND_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
-  SECMIND_LLM_MODEL: ${SECMIND_LLM_MODEL:-qwen-plus}
-  SECMIND_LLM_PLANNER_MODEL: ${SECMIND_LLM_PLANNER_MODEL:-qwen-plus}
-  SECMIND_LLM_WORKER_MODEL: ${SECMIND_LLM_WORKER_MODEL:-qwen-turbo}
-  SECMIND_LLM_FALLBACK_MODEL: ${SECMIND_LLM_FALLBACK_MODEL:-qwen-max}
   SECMIND_LLM_EMBEDDING_MODEL: ${SECMIND_LLM_EMBEDDING_MODEL:-text-embedding-v3}
+  SECMIND_SOURCE_COMMIT: ${SECMIND_SOURCE_COMMIT:-unknown}
+  SECMIND_IMAGE_DIGEST: ${SECMIND_IMAGE_DIGEST:-unknown}
   SECMIND_QDRANT_ENABLED: ${SECMIND_QDRANT_ENABLED:-false}
   SECMIND_QDRANT_URL: http://qdrant:6333
   SECMIND_QDRANT_COLLECTION: ${SECMIND_QDRANT_COLLECTION:-secmind_knowledge}
@@ -81,16 +77,26 @@ services:
       - edge
 
   backend:
+    env_file:
+      - path: ./benchmark/runtime.env
+        required: false
+      - path: ./config/model-public.env
+        required: true
     build:
       context: ./secmind/backend
       dockerfile: ../../docker/backend.Dockerfile
-    image: secmind-backend:${SECMIND_IMAGE_TAG:-local}
+      args:
+        SECMIND_SOURCE_COMMIT: ${SECMIND_SOURCE_COMMIT:-unknown}
+    image: ${SECMIND_BACKEND_IMAGE:-secmind-backend:local}
     environment: *backend-environment
     ports:
       - "${SECMIND_BACKEND_BIND:-127.0.0.1}:${SECMIND_BACKEND_PORT:-8000}:8000"
     volumes:
       - secmind_data:/app/data
       - ./outputs/019f783d-d94a-7f22-8a31-533c5bdca81e/PentAGI原生Prompt中英对比版.xlsx:/app/config/native-prompts.xlsx:ro
+      - ./config/mcp-servers.json:/app/config/mcp-servers.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -119,10 +125,12 @@ services:
       - data
 
   migrate:
-    image: secmind-backend:${SECMIND_IMAGE_TAG:-local}
+    image: ${SECMIND_BACKEND_IMAGE:-secmind-backend:local}
     build:
       context: ./secmind/backend
       dockerfile: ../../docker/backend.Dockerfile
+      args:
+        SECMIND_SOURCE_COMMIT: ${SECMIND_SOURCE_COMMIT:-unknown}
     environment: *backend-environment
     command:
       - python
