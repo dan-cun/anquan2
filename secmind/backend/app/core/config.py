@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     runtime_max_extracted_bytes: int = Field(default=200 * 1024 * 1024, ge=1024)
     runtime_max_files: int = Field(default=10_000, ge=1)
     runtime_max_zip_ratio: int = Field(default=100, ge=1)
+    event_stream_batch_size: int = Field(default=500, ge=1, le=10_000)
+    event_stream_poll_interval_seconds: float = Field(default=1.0, gt=0, le=30)
 
     checkpoint_backend: Literal["memory", "sqlite", "postgres"] = "memory"
     checkpoint_database_url: str | None = None

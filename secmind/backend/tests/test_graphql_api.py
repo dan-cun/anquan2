@@ -12,7 +12,10 @@ from app.graphql.ports import GraphQLBackend
 from app.graphql.router import create_graphql_router
 from app.graphql.schema import graphql_schema
 from app.graphql.types import (
+    AgentInstance,
+    AgentMessage,
     AgentRole,
+    AgentStatus,
     Approval,
     CapabilityKind,
     CreateFlowInput,
@@ -77,6 +80,7 @@ class FakeGraphQLPort:
         self.subtask_batch_calls = 0
         self.last_approval: tuple[str, str, bool, str | None] | None = None
         self.last_registered_server: RegisterMCPServerInput | None = None
+        self.agent_control_calls: list[tuple[str, Any]] = []
 
     async def list_flows(self):
         return [row for row in self.flow_rows]
@@ -145,6 +149,50 @@ class FakeGraphQLPort:
 
     async def list_capabilities(self, server_id: str | None, kind: CapabilityKind | None):
         return []
+
+    async def create(self, input):
+        self.agent_control_calls.append(("create", input))
+        return AgentInstance(
+            instance_id="agent-created",
+            run_id=str(input.run_id or "run-created"),
+            flow_id=input.flow_id,
+            role=input.role,
+            status=AgentStatus.CREATED,
+        )
+
+    async def send_message(self, input):
+        self.agent_control_calls.append(("message", input))
+        return AgentMessage(
+            message_id="message-created",
+            run_id="run-created",
+            flow_id="flow-1",
+            from_agent_instance_id=input.from_agent_instance_id,
+            to_agent_instance_id=input.to_agent_instance_id,
+            kind=input.kind,
+            summary=input.summary,
+            sequence=1,
+            timestamp=datetime.now(UTC),
+        )
+
+    async def wait_agent(self, agent_instance_id: str, timeout_seconds: int):
+        self.agent_control_calls.append(("wait", (agent_instance_id, timeout_seconds)))
+        return AgentInstance(
+            instance_id=agent_instance_id,
+            run_id="run-created",
+            flow_id="flow-1",
+            role=AgentRole.SEARCHER,
+            status=AgentStatus.WAITING,
+        )
+
+    async def stop_agent(self, agent_instance_id: str, reason: str):
+        self.agent_control_calls.append(("stop", (agent_instance_id, reason)))
+        return AgentInstance(
+            instance_id=agent_instance_id,
+            run_id="run-created",
+            flow_id="flow-1",
+            role=AgentRole.SEARCHER,
+            status=AgentStatus.CANCELLED,
+        )
 
     def subscribe(self, topic: str, **filters: Any) -> AsyncIterator[Any]:
         async def iterator() -> AsyncIterator[Any]:
@@ -266,6 +314,58 @@ async def test_subscription_delegates_replay_cursor_to_event_port() -> None:
         }
     }
     await stream.aclose()
+
+
+async def test_agent_graph_mutations_delegate_to_control_port() -> None:
+    port = FakeGraphQLPort()
+    result = await graphql_schema.execute(
+        """
+        mutation {
+          createAgent(input: {
+            flowId: "flow-1"
+            runId: "run-created"
+            role: SEARCHER
+            objective: "检索公开情报"
+          }) { instanceId status role }
+          sendAgentMessage(input: {
+            fromAgentInstanceId: "agent-source"
+            toAgentInstanceId: "agent-target"
+            summary: "请验证 evidence-1"
+            kind: REQUEST
+          }) { messageId sequence kind summary }
+          waitAgent(agentInstanceId: "agent-source", timeoutSeconds: 5) {
+            instanceId status
+          }
+          stopAgent(agentInstanceId: "agent-source", reason: "任务已完成") {
+            instanceId status
+          }
+        }
+        """,
+        context_value=GraphQLContext.create(backend(port)),
+    )
+
+    assert result.errors is None
+    assert result.data == {
+        "createAgent": {
+            "instanceId": "agent-created",
+            "status": "CREATED",
+            "role": "SEARCHER",
+        },
+        "sendAgentMessage": {
+            "messageId": "message-created",
+            "sequence": 1,
+            "kind": "REQUEST",
+            "summary": "请验证 evidence-1",
+        },
+        "waitAgent": {"instanceId": "agent-source", "status": "WAITING"},
+        "stopAgent": {"instanceId": "agent-source", "status": "CANCELLED"},
+    }
+    assert [item[0] for item in port.agent_control_calls] == [
+        "create",
+        "message",
+        "wait",
+        "stop",
+    ]
 
 
 def test_router_constructor_supports_fastapi_http_context() -> None:

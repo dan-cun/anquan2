@@ -6,6 +6,7 @@ uses its own Git worktree and branch created from the integration baseline.
 ## Common Rules
 
 1. Read `docs/integration-contracts.md`, `docs/contracts/native-data-model.md`, and
+   `docs/contracts/runtime-event-contract.md`, then read
    `secmind/backend/app/graphql/schema.graphql` before implementation.
 2. Do not edit shared files owned by the integration branch.
 3. Use canonical models from `app.schemas.agents`, `app.schemas.mcp`, `app.schemas.prompts`, and

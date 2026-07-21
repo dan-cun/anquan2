@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from app.schemas.agents import (
     AgentDelegation,
@@ -16,7 +18,12 @@ from app.schemas.agents import (
     AgentStatus,
     AgentTask,
 )
-from app.schemas.runtime import RuntimeEventType
+from app.schemas.runtime import (
+    DecisionKind,
+    DecisionRecord,
+    EventContext,
+    RuntimeEventType,
+)
 from app.schemas.tools import (
     ToolExecutionStatus,
     UnifiedToolInvocation,
@@ -27,10 +34,20 @@ from .chains import InMemoryMessageChainStore, MessageChainStore
 from .native import AgentRunContext, ToolGateway
 from .registry import NativeAgentRegistry
 
-EventPublisher = Callable[[str, dict[str, Any], str], Awaitable[None] | None]
+EventPublisher = Callable[
+    [str, dict[str, Any], str, EventContext | None],
+    Awaitable[None] | None,
+]
+ContextProvider = Callable[[str, str | None], dict[str, Any]]
+logger = logging.getLogger(__name__)
 
 
-async def _noop_publisher(event_type: str, payload: dict[str, Any], actor: str) -> None:
+async def _noop_publisher(
+    event_type: str,
+    payload: dict[str, Any],
+    actor: str,
+    context: EventContext | None = None,
+) -> None:
     return None
 
 
@@ -46,6 +63,7 @@ class AgentDispatcher:
         chain_store: MessageChainStore | None = None,
         max_parallel: int = 4,
         max_delegation_depth: int = 12,
+        context_provider: ContextProvider | None = None,
     ) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
@@ -53,19 +71,42 @@ class AgentDispatcher:
             raise ValueError("max_delegation_depth must be positive")
         self.registry = registry
         self.publisher = publisher or _noop_publisher
+        publisher_parameters = inspect.signature(self.publisher).parameters.values()
+        self._publisher_accepts_context = any(
+            item.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+            for item in publisher_parameters
+        ) or len(inspect.signature(self.publisher).parameters) >= 4
         self.tool_gateway = tool_gateway
         self.chain_store = chain_store or InMemoryMessageChainStore()
         self.max_parallel = max_parallel
         self.max_delegation_depth = max_delegation_depth
+        self.context_provider = context_provider
         self._instances: dict[str, AgentInstance] = {}
         self._delegations: dict[str, AgentDelegation] = {}
         self._messages: list[AgentMessage] = []
         self._message_sequences: dict[str, int] = {}
         self._results: dict[str, AgentResult] = {}
+        self._inboxes: dict[str, asyncio.Queue[AgentMessage | None]] = {}
+        self._completion_events: dict[str, asyncio.Event] = {}
+        self._stop_requests: dict[str, str] = {}
+        self._background_tasks: set[asyncio.Task[AgentResult]] = set()
         self._lock = asyncio.Lock()
 
     async def dispatch_root(self, role: AgentRole, task: AgentTask) -> AgentResult:
         return await self._dispatch(role, task, parent_instance_id=None, depth=0)
+
+    async def start_root(self, role: AgentRole, task: AgentTask) -> AgentInstance:
+        """Start a root Agent in the background and return after `agent.created`."""
+        ready: asyncio.Future[AgentInstance] = asyncio.get_running_loop().create_future()
+        background = self._background_dispatch(
+            role,
+            task,
+            parent_instance_id=None,
+            depth=0,
+            ready=ready,
+        )
+        self._track_background(background)
+        return await ready
 
     async def delegate_from(
         self,
@@ -76,8 +117,168 @@ class AgentDispatcher:
         parent = self._instances.get(parent_instance_id)
         if parent is None:
             raise KeyError(parent_instance_id)
+        self._validate_child_task(parent, task)
         depth = int(parent.metadata.get("delegation_depth", 0)) + 1
         return await self._delegate(parent, role, task, depth=depth)
+
+    async def start_delegation(
+        self,
+        parent_instance_id: str,
+        role: AgentRole,
+        task: AgentTask,
+    ) -> AgentDelegation:
+        """Create a first-class delegation and run its child asynchronously."""
+        parent = self._instances.get(parent_instance_id)
+        if parent is None:
+            raise KeyError(parent_instance_id)
+        self._validate_child_task(parent, task)
+        depth = int(parent.metadata.get("delegation_depth", 0)) + 1
+        ready: asyncio.Future[AgentDelegation] = asyncio.get_running_loop().create_future()
+        background = self._background_delegate(parent, role, task, depth=depth, ready=ready)
+        self._track_background(background)
+        return await ready
+
+    async def send_message(
+        self,
+        *,
+        from_agent_instance_id: str,
+        to_agent_instance_id: str,
+        summary: str,
+        kind: AgentMessageKind = AgentMessageKind.STATUS,
+        payload_ref: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentMessage:
+        source = self._instances.get(from_agent_instance_id)
+        target = self._instances.get(to_agent_instance_id)
+        if source is None:
+            raise KeyError(from_agent_instance_id)
+        if target is None:
+            raise KeyError(to_agent_instance_id)
+        if source.instance_id == target.instance_id:
+            raise ValueError("Agent cannot send a graph message to itself")
+        if source.run_id != target.run_id or source.flow_id != target.flow_id:
+            raise ValueError("Agent messages cannot cross run or flow boundaries")
+        if target.status in {
+            AgentStatus.COMPLETED,
+            AgentStatus.FAILED,
+            AgentStatus.CANCELLED,
+        }:
+            raise ValueError("Cannot send a message to a terminal Agent")
+        message = AgentMessage(
+            run_id=source.run_id,
+            flow_id=source.flow_id,
+            from_agent_instance_id=source.instance_id,
+            to_agent_instance_id=target.instance_id,
+            kind=kind,
+            summary=summary,
+            payload_ref=payload_ref,
+            metadata=metadata or {},
+        )
+        await self._message(message, source.role)
+        chain = await self.chain_store.for_instance(target.instance_id)
+        chain.append(
+            "user",
+            summary,
+            graph_message_id=message.message_id,
+            from_agent_instance_id=source.instance_id,
+            message_kind=kind.value,
+            payload_ref=payload_ref,
+        )
+        await self._inboxes[target.instance_id].put(message)
+        return message
+
+    async def wait_for_message(
+        self,
+        agent_instance_id: str,
+        *,
+        reason: str,
+        timeout_seconds: float | None = None,
+    ) -> AgentMessage | None:
+        if timeout_seconds is not None and timeout_seconds < 0:
+            raise ValueError("timeout_seconds must not be negative")
+        instance = self._active_instance(agent_instance_id)
+        inbox = self._inboxes[agent_instance_id]
+        parked = inbox.empty()
+        if parked:
+            instance.status = AgentStatus.WAITING
+            instance.updated_at = datetime.now(UTC)
+            await self._publish(
+                RuntimeEventType.AGENT_WAITING,
+                {"instance": instance.model_dump(mode="json"), "reason": reason},
+                instance.role,
+                context=self._event_context(instance, correlation_id=str(uuid4())),
+            )
+        try:
+            if timeout_seconds is None:
+                message = await inbox.get()
+            else:
+                message = await asyncio.wait_for(inbox.get(), timeout_seconds)
+        except TimeoutError:
+            message = None
+            outcome = "timeout"
+        else:
+            outcome = "stopped" if message is None else "message_arrived"
+        if parked and agent_instance_id not in self._stop_requests:
+            instance.status = AgentStatus.RUNNING
+            instance.updated_at = datetime.now(UTC)
+            await self._publish(
+                RuntimeEventType.AGENT_RESUMED,
+                {
+                    "instance": instance.model_dump(mode="json"),
+                    "reason": reason,
+                    "outcome": outcome,
+                },
+                instance.role,
+                context=self._event_context(instance, correlation_id=str(uuid4())),
+            )
+        return message
+
+    async def wait_for_agent(
+        self,
+        agent_instance_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AgentResult | None:
+        if agent_instance_id in self._results:
+            return self._results[agent_instance_id]
+        completion = self._completion_events.get(agent_instance_id)
+        if completion is None:
+            raise KeyError(agent_instance_id)
+        try:
+            if timeout_seconds is None:
+                await completion.wait()
+            else:
+                await asyncio.wait_for(completion.wait(), timeout_seconds)
+        except TimeoutError:
+            return None
+        return self._results.get(agent_instance_id)
+
+    async def stop_agent(self, agent_instance_id: str, *, reason: str) -> AgentInstance:
+        instance = self._instances.get(agent_instance_id)
+        if instance is None:
+            raise KeyError(agent_instance_id)
+        if instance.status in {
+            AgentStatus.COMPLETED,
+            AgentStatus.FAILED,
+            AgentStatus.CANCELLED,
+        }:
+            return instance
+        terminal = {AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.CANCELLED}
+        targets = [item for item in self._subtree(agent_instance_id) if item.status not in terminal]
+        correlation_id = str(uuid4())
+        for target in targets:
+            self._stop_requests[target.instance_id] = reason
+            await self._inboxes[target.instance_id].put(None)
+            await self._publish_controlled(
+                target,
+                RuntimeEventType.AGENT_STOP_REQUESTED,
+                {"instance": target.model_dump(mode="json"), "reason": reason},
+                kind=DecisionKind.STOP,
+                decision="stop_agent",
+                rationale_summary=reason,
+                correlation_id=correlation_id,
+            )
+        return instance
 
     async def dispatch_many(
         self,
@@ -91,6 +292,67 @@ class AgentDispatcher:
 
         return await asyncio.gather(*(run(role, task) for role, task in assignments))
 
+    def _background_dispatch(
+        self,
+        role: AgentRole,
+        task: AgentTask,
+        *,
+        parent_instance_id: str | None,
+        depth: int,
+        ready: asyncio.Future[AgentInstance],
+    ) -> asyncio.Task[AgentResult]:
+        async def run() -> AgentResult:
+            try:
+                return await self._dispatch(
+                    role,
+                    task,
+                    parent_instance_id=parent_instance_id,
+                    depth=depth,
+                    ready=ready,
+                )
+            except Exception as error:
+                if not ready.done():
+                    ready.set_exception(error)
+                raise
+
+        return asyncio.create_task(run(), name=f"secmind-agent-{role.value}-{task.task_id}")
+
+    def _background_delegate(
+        self,
+        parent: AgentInstance,
+        role: AgentRole,
+        task: AgentTask,
+        *,
+        depth: int,
+        ready: asyncio.Future[AgentDelegation],
+    ) -> asyncio.Task[AgentResult]:
+        async def run() -> AgentResult:
+            try:
+                return await self._delegate(parent, role, task, depth=depth, ready=ready)
+            except Exception as error:
+                if not ready.done():
+                    ready.set_exception(error)
+                raise
+
+        return asyncio.create_task(
+            run(),
+            name=f"secmind-delegation-{parent.instance_id}-{task.task_id}",
+        )
+
+    def _track_background(self, task: asyncio.Task[AgentResult]) -> None:
+        self._background_tasks.add(task)
+
+        def completed(value: asyncio.Task[AgentResult]) -> None:
+            self._background_tasks.discard(value)
+            try:
+                value.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Background Agent task failed")
+
+        task.add_done_callback(completed)
+
     async def _dispatch(
         self,
         role: AgentRole,
@@ -98,6 +360,7 @@ class AgentDispatcher:
         *,
         parent_instance_id: str | None,
         depth: int,
+        ready: asyncio.Future[AgentInstance] | None = None,
     ) -> AgentResult:
         descriptor = self.registry.descriptor(role)
         instance = AgentInstance(
@@ -111,7 +374,14 @@ class AgentDispatcher:
         )
         async with self._lock:
             self._instances[instance.instance_id] = instance
-        await self._publish(RuntimeEventType.AGENT_CREATED, instance.model_dump(mode="json"), role)
+            self._inboxes[instance.instance_id] = asyncio.Queue()
+            self._completion_events[instance.instance_id] = asyncio.Event()
+        await self._publish(
+            RuntimeEventType.AGENT_CREATED,
+            instance.model_dump(mode="json"),
+            role,
+            context=self._event_context(instance, correlation_id=instance.instance_id),
+        )
         chain = await self.chain_store.create(
             run_id=task.run_id,
             flow_id=task.flow_id,
@@ -119,6 +389,8 @@ class AgentDispatcher:
             agent_role=role,
         )
         instance.metadata["chain_id"] = chain.chain_id
+        if ready is not None and not ready.done():
+            ready.set_result(instance)
 
         if depth > self.max_delegation_depth:
             instance.status = AgentStatus.FAILED
@@ -142,13 +414,20 @@ class AgentDispatcher:
                     "result": result.model_dump(mode="json"),
                 },
                 role,
+                context=self._event_context(instance, correlation_id=instance.instance_id),
             )
+            self._completion_events[instance.instance_id].set()
             return result
 
         instance.status = AgentStatus.RUNNING
         instance.started_at = datetime.now(UTC)
         instance.updated_at = instance.started_at
-        await self._publish(RuntimeEventType.AGENT_STARTED, instance.model_dump(mode="json"), role)
+        await self._publish(
+            RuntimeEventType.AGENT_STARTED,
+            instance.model_dump(mode="json"),
+            role,
+            context=self._event_context(instance, correlation_id=instance.instance_id),
+        )
 
         async def delegate(child_role: AgentRole, child_task: AgentTask) -> AgentResult:
             return await self._delegate(instance, child_role, child_task, depth=depth + 1)
@@ -173,12 +452,67 @@ class AgentDispatcher:
                 )
             return await self.tool_gateway.invoke(invocation)
 
+        async def send_message(
+            target_agent_instance_id: str,
+            summary: str,
+            kind: AgentMessageKind,
+            metadata: dict[str, Any],
+        ) -> AgentMessage:
+            return await self.send_message(
+                from_agent_instance_id=instance.instance_id,
+                to_agent_instance_id=target_agent_instance_id,
+                summary=summary,
+                kind=kind,
+                metadata=metadata,
+            )
+
+        async def wait_for_message(
+            reason: str,
+            timeout_seconds: float | None,
+        ) -> AgentMessage | None:
+            return await self.wait_for_message(
+                instance.instance_id,
+                reason=reason,
+                timeout_seconds=timeout_seconds,
+            )
+
+        async def publish_runtime_event(
+            event_type: str,
+            payload: dict[str, Any],
+        ) -> None:
+            runtime_type = RuntimeEventType(event_type)
+            correlation_id = str(payload.get("detection_id") or uuid4())
+            await self._publish(
+                runtime_type,
+                {
+                    "run_id": task.run_id,
+                    "flow_id": task.flow_id,
+                    "agent_instance_id": instance.instance_id,
+                    "task_id": task.task_id,
+                    **payload,
+                },
+                role,
+                context=self._event_context(
+                    instance,
+                    correlation_id=correlation_id,
+                ),
+            )
+
         context = AgentRunContext(
             instance=instance,
             task=task,
             chain=chain,
             delegate_callback=delegate,
             tool_callback=invoke_tool,
+            message_callback=send_message,
+            wait_message_callback=wait_for_message,
+            stop_requested_callback=lambda: instance.instance_id in self._stop_requests,
+            runtime_event_callback=publish_runtime_event,
+            long_term_context=(
+                self.context_provider(task.run_id, instance.instance_id)
+                if self.context_provider is not None
+                else {}
+            ),
         )
         try:
             result = await self.registry.subgraph(role).invoke(context)
@@ -186,11 +520,24 @@ class AgentDispatcher:
             instance.status = AgentStatus.CANCELLED
             instance.completed_at = datetime.now(UTC)
             instance.updated_at = instance.completed_at
+            result = AgentResult(
+                agent_instance_id=instance.instance_id,
+                task_id=task.task_id,
+                status=AgentStatus.CANCELLED,
+                summary="Agent execution task was cancelled",
+                error_code="AGENT_TASK_CANCELLED",
+                error_message="Agent execution task was cancelled",
+                started_at=instance.started_at,
+                completed_at=instance.completed_at,
+            )
+            self._results[instance.instance_id] = result
             await self._publish(
                 RuntimeEventType.AGENT_CANCELLED,
                 instance.model_dump(mode="json"),
                 role,
+                context=self._event_context(instance, correlation_id=instance.instance_id),
             )
+            self._completion_events[instance.instance_id].set()
             raise
         except Exception as error:
             result = AgentResult(
@@ -204,26 +551,47 @@ class AgentDispatcher:
             )
 
         terminal_status = (
-            AgentStatus.COMPLETED if result.status == AgentStatus.COMPLETED else AgentStatus.FAILED
+            result.status
+            if result.status
+            in {AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.CANCELLED}
+            else AgentStatus.FAILED
         )
         instance.status = terminal_status
         instance.completed_at = result.completed_at
         instance.updated_at = result.completed_at
         async with self._lock:
             self._results[instance.instance_id] = result
-        event_type = (
-            RuntimeEventType.AGENT_COMPLETED
-            if terminal_status == AgentStatus.COMPLETED
-            else RuntimeEventType.AGENT_FAILED
-        )
-        await self._publish(
-            event_type,
-            {
-                "instance": instance.model_dump(mode="json"),
-                "result": result.model_dump(mode="json"),
-            },
-            role,
-        )
+        event_type = {
+            AgentStatus.COMPLETED: RuntimeEventType.AGENT_COMPLETED,
+            AgentStatus.FAILED: RuntimeEventType.AGENT_FAILED,
+            AgentStatus.CANCELLED: RuntimeEventType.AGENT_CANCELLED,
+        }[terminal_status]
+        payload = {
+            "instance": instance.model_dump(mode="json"),
+            "result": result.model_dump(mode="json"),
+        }
+        if terminal_status == AgentStatus.COMPLETED:
+            await self._publish_controlled(
+                instance,
+                event_type,
+                payload,
+                kind=DecisionKind.COMPLETE,
+                decision="complete_agent",
+                rationale_summary=result.summary or "Agent completed its assigned objective.",
+                correlation_id=f"completion:{instance.instance_id}",
+            )
+        else:
+            await self._publish(
+                event_type,
+                payload,
+                role,
+                context=self._event_context(
+                    instance,
+                    correlation_id=f"completion:{instance.instance_id}",
+                ),
+            )
+        self._stop_requests.pop(instance.instance_id, None)
+        self._completion_events[instance.instance_id].set()
         return result
 
     async def _delegate(
@@ -233,6 +601,7 @@ class AgentDispatcher:
         task: AgentTask,
         *,
         depth: int,
+        ready: asyncio.Future[AgentDelegation] | None = None,
     ) -> AgentResult:
         delegation = AgentDelegation(
             run_id=task.run_id,
@@ -243,11 +612,19 @@ class AgentDispatcher:
         )
         async with self._lock:
             self._delegations[delegation.delegation_id] = delegation
-        await self._publish(
+        await self._publish_controlled(
+            parent,
             RuntimeEventType.AGENT_DELEGATED,
             delegation.model_dump(mode="json"),
-            parent.role,
+            kind=DecisionKind.DELEGATE,
+            decision=f"delegate_to:{role.value}",
+            rationale_summary=(
+                f"将独立子任务委派给 {role.value}，目标为：{task.objective}"
+            ),
+            correlation_id=delegation.delegation_id,
         )
+        if ready is not None and not ready.done():
+            ready.set_result(delegation)
         await self._message(
             AgentMessage(
                 run_id=task.run_id,
@@ -296,17 +673,124 @@ class AgentDispatcher:
             self._message_sequences[message.run_id] = next_sequence
             message.sequence = next_sequence
             self._messages.append(message)
-        await self._publish(RuntimeEventType.AGENT_MESSAGE, message.model_dump(mode="json"), actor)
+        source = self._instances.get(message.from_agent_instance_id)
+        await self._publish(
+            RuntimeEventType.AGENT_MESSAGE,
+            message.model_dump(mode="json"),
+            actor,
+            context=(
+                None
+                if source is None
+                else self._event_context(source, correlation_id=message.message_id)
+            ),
+        )
 
     async def _publish(
         self,
         event_type: RuntimeEventType,
         payload: dict[str, Any],
         actor: AgentRole,
+        *,
+        context: EventContext | None = None,
     ) -> None:
-        result = self.publisher(event_type.value, payload, actor.value)
+        if self._publisher_accepts_context:
+            result = self.publisher(event_type.value, payload, actor.value, context)
+        else:
+            result = self.publisher(event_type.value, payload, actor.value)  # type: ignore[call-arg]
         if inspect.isawaitable(result):
             await result
+
+    async def _publish_controlled(
+        self,
+        instance: AgentInstance,
+        event_type: RuntimeEventType,
+        payload: dict[str, Any],
+        *,
+        kind: DecisionKind,
+        decision: str,
+        rationale_summary: str,
+        correlation_id: str,
+    ) -> None:
+        record = DecisionRecord(
+            kind=kind,
+            goal=decision,
+            decision=decision,
+            rationale_summary=rationale_summary or "执行已请求的 Agent Graph 控制操作。",
+            expected_outcome=f"产生 {event_type.value} 状态变更。",
+            model_id="agent-dispatcher",
+            prompt_version="agent-graph-v1",
+        )
+        context = self._event_context(
+            instance,
+            correlation_id=correlation_id,
+            decision_id=record.decision_id,
+        )
+        await self._publish(
+            RuntimeEventType.DECISION_RECORDED,
+            {
+                "run_id": instance.run_id,
+                "flow_id": instance.flow_id,
+                "decision": record.model_dump(mode="json"),
+            },
+            instance.role,
+            context=context,
+        )
+        await self._publish(
+            event_type,
+            payload,
+            instance.role,
+            context=context,
+        )
+
+    @staticmethod
+    def _event_context(
+        instance: AgentInstance,
+        *,
+        correlation_id: str,
+        decision_id: str | None = None,
+    ) -> EventContext:
+        return EventContext(
+            flow_id=instance.flow_id,
+            correlation_id=correlation_id,
+            decision_id=decision_id,
+            agent_instance_id=instance.instance_id,
+            task_id=instance.task_id,
+        )
+
+    def _active_instance(self, agent_instance_id: str) -> AgentInstance:
+        instance = self._instances.get(agent_instance_id)
+        if instance is None:
+            raise KeyError(agent_instance_id)
+        if instance.status in {
+            AgentStatus.COMPLETED,
+            AgentStatus.FAILED,
+            AgentStatus.CANCELLED,
+        }:
+            raise ValueError("Terminal Agent cannot enter a waiting state")
+        return instance
+
+    def _subtree(self, agent_instance_id: str) -> list[AgentInstance]:
+        result: list[AgentInstance] = []
+        pending = [agent_instance_id]
+        while pending:
+            current = pending.pop(0)
+            instance = self._instances.get(current)
+            if instance is None:
+                continue
+            result.append(instance)
+            pending.extend(
+                item.instance_id
+                for item in self._instances.values()
+                if item.parent_instance_id == current
+            )
+        return result
+
+    @staticmethod
+    def _validate_child_task(parent: AgentInstance, task: AgentTask) -> None:
+        if parent.run_id != task.run_id or parent.flow_id != task.flow_id:
+            raise ValueError("Delegated Agent task must remain in the parent run and flow")
+        if task.parent_agent_instance_id not in {None, parent.instance_id}:
+            raise ValueError("Delegated Agent task has a conflicting parent instance")
 
     def instances(self, run_id: str | None = None) -> list[AgentInstance]:
         values = list(self._instances.values())

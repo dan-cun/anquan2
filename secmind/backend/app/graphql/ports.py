@@ -13,28 +13,40 @@ from app.graphql.types import (
     Artifact,
     Assistant,
     CapabilityKind,
+    ContextSnapshot,
+    CreateAgentInput,
     CreateAssistantInput,
     CreateFlowInput,
     CreatePromptVersionInput,
+    CreateTodoInput,
     DelegateAgentInput,
     Evidence,
     Finding,
     Flow,
+    LoadSkillInput,
     MCPCapability,
     MCPServer,
     MessageChain,
+    Note,
     PromptTemplate,
     PromptVersion,
+    RecordNoteInput,
     RegisterMCPServerInput,
+    RegisterSkillInput,
     Report,
     RevisePlanInput,
     RuntimeEvent,
+    SendAgentMessageInput,
+    Skill,
+    SkillLoad,
     SubmitFlowInput,
     Subtask,
     Task,
+    Todo,
     ToolCall,
     UnifiedTool,
     UpdateMCPServerInput,
+    UpdateTodoInput,
     UsageStats,
 )
 
@@ -108,6 +120,18 @@ class AgentGraphQLPort(Protocol):
 
     async def delegate(self, input: DelegateAgentInput) -> AgentDelegation: ...
 
+    async def create(self, input: CreateAgentInput) -> AgentInstance: ...
+
+    async def send_message(self, input: SendAgentMessageInput) -> AgentMessage: ...
+
+    async def wait_agent(
+        self,
+        agent_instance_id: str,
+        timeout_seconds: int,
+    ) -> AgentInstance: ...
+
+    async def stop_agent(self, agent_instance_id: str, reason: str) -> AgentInstance: ...
+
 
 class ToolGraphQLPort(Protocol):
     async def list_tools(self) -> Sequence[UnifiedTool]: ...
@@ -157,6 +181,26 @@ class PromptGraphQLPort(Protocol):
     async def enable_version(self, prompt_key: str, version_id: str) -> PromptTemplate: ...
 
     async def import_workbook(self, workbook_ref: str) -> Sequence[PromptTemplate]: ...
+
+
+class LongTermGraphQLPort(Protocol):
+    async def list_skills(self, enabled: bool | None) -> Sequence[Skill]: ...
+    async def list_skill_loads(
+        self, run_id: str, agent_instance_id: str | None
+    ) -> Sequence[SkillLoad]: ...
+    async def list_todos(self, run_id: str) -> Sequence[Todo]: ...
+    async def list_notes(self, run_id: str, active_only: bool) -> Sequence[Note]: ...
+    async def list_context_snapshots(self, run_id: str) -> Sequence[ContextSnapshot]: ...
+    async def register_skill(self, input: RegisterSkillInput) -> Skill: ...
+    async def load_skill(self, input: LoadSkillInput) -> SkillLoad: ...
+    async def unload_skill(self, load_id: str) -> SkillLoad: ...
+    async def create_todo(self, input: CreateTodoInput) -> Todo: ...
+    async def update_todo(self, todo_id: str, input: UpdateTodoInput) -> Todo: ...
+    async def record_note(self, input: RecordNoteInput) -> Note: ...
+    async def archive_note(self, note_id: str) -> Note: ...
+    async def compress_context(
+        self, run_id: str, flow_id: str, agent_instance_id: str | None
+    ) -> ContextSnapshot: ...
 
 
 class AuditGraphQLPort(Protocol):
@@ -213,3 +257,4 @@ class GraphQLBackend:
     audit: AuditGraphQLPort
     analytics: AnalyticsGraphQLPort
     events: EventGraphQLPort
+    long_term: LongTermGraphQLPort | None = None

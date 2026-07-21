@@ -10,10 +10,18 @@ from app.schemas.agents import (
 )
 from app.schemas.agents import AgentRole as AgentRoleModel
 from app.schemas.agents import AgentStatus as AgentStatusModel
+from app.schemas.long_term import NoteKind as NoteKindModel
+from app.schemas.long_term import NoteStatus as NoteStatusModel
+from app.schemas.long_term import TodoPriority as TodoPriorityModel
+from app.schemas.long_term import TodoStatus as TodoStatusModel
 from app.schemas.mcp import MCPServerStatus as MCPServerStatusModel
 from app.schemas.mcp import MCPTransport as MCPTransportModel
 from app.schemas.prompts import PromptMessageRole as PromptMessageRoleModel
 from app.schemas.prompts import PromptVersionStatus as PromptVersionStatusModel
+from app.schemas.runtime import DecisionKind as DecisionKindModel
+from app.schemas.runtime import EventCategory as EventCategoryModel
+from app.schemas.runtime import EventVisibility as EventVisibilityModel
+from app.schemas.runtime import VerificationVerdict as VerificationVerdictModel
 from app.schemas.tools import CapabilityKind as CapabilityKindModel
 from app.schemas.tools import ToolExecutionStatus as ToolExecutionStatusModel
 from app.schemas.tools import ToolOrigin as ToolOriginModel
@@ -28,6 +36,14 @@ ToolOrigin = strawberry.enum(ToolOriginModel, name="ToolOrigin")
 ToolExecutionStatus = strawberry.enum(ToolExecutionStatusModel, name="ToolExecutionStatus")
 PromptMessageRole = strawberry.enum(PromptMessageRoleModel, name="PromptMessageRole")
 PromptVersionStatus = strawberry.enum(PromptVersionStatusModel, name="PromptVersionStatus")
+DecisionKind = strawberry.enum(DecisionKindModel, name="DecisionKind")
+EventCategory = strawberry.enum(EventCategoryModel, name="EventCategory")
+EventVisibility = strawberry.enum(EventVisibilityModel, name="EventVisibility")
+VerificationVerdict = strawberry.enum(VerificationVerdictModel, name="VerificationVerdict")
+TodoStatus = strawberry.enum(TodoStatusModel, name="TodoStatus")
+TodoPriority = strawberry.enum(TodoPriorityModel, name="TodoPriority")
+NoteKind = strawberry.enum(NoteKindModel, name="NoteKind")
+NoteStatus = strawberry.enum(NoteStatusModel, name="NoteStatus")
 
 
 @strawberry.type
@@ -282,6 +298,139 @@ class PromptTemplate:
 
 
 @strawberry.type
+class Skill:
+    skill_id: strawberry.ID
+    name: str
+    description: str
+    version: str
+    content: str
+    checksum: str
+    tags: list[str]
+    compatible_roles: list[str]
+    source: str
+    enabled: bool
+    metadata: JSON
+    created_at: datetime
+    updated_at: datetime
+
+
+@strawberry.type
+class SkillLoad:
+    load_id: strawberry.ID
+    skill_id: strawberry.ID
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    reason: str
+    loaded_at: datetime
+    agent_instance_id: strawberry.ID | None = None
+    unloaded_at: datetime | None = None
+
+
+@strawberry.type
+class Todo:
+    todo_id: strawberry.ID
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    title: str
+    description: str
+    status: TodoStatus
+    priority: TodoPriority
+    position: int
+    depends_on: list[strawberry.ID]
+    evidence_ids: list[strawberry.ID]
+    created_at: datetime
+    updated_at: datetime
+    task_id: strawberry.ID | None = None
+    agent_instance_id: strawberry.ID | None = None
+    completed_at: datetime | None = None
+
+
+@strawberry.type
+class Note:
+    note_id: strawberry.ID
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    kind: NoteKind
+    content: str
+    status: NoteStatus
+    evidence_ids: list[strawberry.ID]
+    tags: list[str]
+    created_at: datetime
+    updated_at: datetime
+    agent_instance_id: strawberry.ID | None = None
+
+
+@strawberry.type
+class ContextSnapshot:
+    snapshot_id: strawberry.ID
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    source_from_sequence: int
+    source_to_sequence: int
+    estimated_tokens_before: int
+    estimated_tokens_after: int
+    narrative_summary: str
+    structured: JSON
+    created_at: datetime
+    agent_instance_id: strawberry.ID | None = None
+
+
+@strawberry.input
+class RegisterSkillInput:
+    skill_id: strawberry.ID
+    name: str
+    content: str
+    description: str = ""
+    version: str = "1.0"
+    tags: list[str] | None = None
+    compatible_roles: list[str] | None = None
+    source: str = "operator"
+    enabled: bool = True
+    metadata: JSON | None = None
+
+
+@strawberry.input
+class LoadSkillInput:
+    skill_id: strawberry.ID
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    agent_instance_id: strawberry.ID | None = None
+    reason: str = ""
+
+
+@strawberry.input
+class CreateTodoInput:
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    title: str
+    description: str = ""
+    priority: TodoPriority = TodoPriorityModel.NORMAL
+    position: int = 0
+    task_id: strawberry.ID | None = None
+    agent_instance_id: strawberry.ID | None = None
+    depends_on: list[strawberry.ID] | None = None
+
+
+@strawberry.input
+class UpdateTodoInput:
+    status: TodoStatus | None = None
+    title: str | None = None
+    description: str | None = None
+    evidence_ids: list[strawberry.ID] | None = None
+
+
+@strawberry.input
+class RecordNoteInput:
+    run_id: strawberry.ID
+    flow_id: strawberry.ID
+    kind: NoteKind
+    content: str
+    agent_instance_id: strawberry.ID | None = None
+    evidence_ids: list[strawberry.ID] | None = None
+    tags: list[str] | None = None
+
+
+@strawberry.type
 class Approval:
     request_id: strawberry.ID
     run_id: strawberry.ID
@@ -295,6 +444,33 @@ class Approval:
 
 
 @strawberry.type
+class DecisionAlternative:
+    option: str
+    rejection_reason: str
+    evidence_ids: list[strawberry.ID]
+
+
+@strawberry.type
+class DecisionRecord:
+    decision_id: strawberry.ID
+    kind: DecisionKind
+    goal: str
+    decision: str
+    rationale_summary: str
+    evidence_ids: list[strawberry.ID]
+    alternatives: list[DecisionAlternative]
+    confidence: float
+    created_at: datetime
+    expected_outcome: str | None = None
+    risk_summary: str | None = None
+    actual_outcome: str | None = None
+    next_action: str | None = None
+    policy_ids: list[str] = strawberry.field(default_factory=list)
+    model_id: str | None = None
+    prompt_version: str | None = None
+
+
+@strawberry.type
 class RuntimeEvent:
     event_id: strawberry.ID
     run_id: strawberry.ID
@@ -305,6 +481,18 @@ class RuntimeEvent:
     timestamp: datetime
     prev_hash: str
     hash: str
+    schema_version: str = "1.0"
+    category: EventCategory = EventCategoryModel.SYSTEM
+    visibility: EventVisibility = EventVisibilityModel.PUBLIC
+    flow_id: strawberry.ID | None = None
+    correlation_id: strawberry.ID | None = None
+    causation_id: strawberry.ID | None = None
+    decision_id: strawberry.ID | None = None
+    agent_instance_id: strawberry.ID | None = None
+    task_id: strawberry.ID | None = None
+    tool_invocation_id: strawberry.ID | None = None
+    decision: DecisionRecord | None = None
+    verification_verdict: VerificationVerdict | None = None
 
 
 @strawberry.type
@@ -440,6 +628,25 @@ class DelegateAgentInput:
     context_refs: list[str] | None = strawberry.UNSET
     constraints: list[str] | None = strawberry.UNSET
     expected_outputs: list[str] | None = strawberry.UNSET
+    metadata: JSON | None = strawberry.UNSET
+
+
+@strawberry.input
+class CreateAgentInput:
+    flow_id: strawberry.ID
+    role: AgentRole
+    objective: str
+    run_id: strawberry.ID | None = strawberry.UNSET
+    metadata: JSON | None = strawberry.UNSET
+
+
+@strawberry.input
+class SendAgentMessageInput:
+    from_agent_instance_id: strawberry.ID
+    to_agent_instance_id: strawberry.ID
+    summary: str
+    kind: AgentMessageKind = AgentMessageKindModel.STATUS
+    payload_ref: str | None = strawberry.UNSET
     metadata: JSON | None = strawberry.UNSET
 
 

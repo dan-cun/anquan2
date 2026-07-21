@@ -420,3 +420,88 @@ class LLMUsageRow(Base):
     estimated_cost: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
     duration_ms: Mapped[int] = mapped_column(sa.Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+
+
+class SkillRow(Base):
+    __tablename__ = "skills"
+
+    skill_id: Mapped[str] = mapped_column(sa.String(120), primary_key=True)
+    name: Mapped[str] = mapped_column(sa.String(200))
+    description: Mapped[str] = mapped_column(sa.Text, default="")
+    version: Mapped[str] = mapped_column(sa.String(80))
+    content: Mapped[str] = mapped_column(sa.Text)
+    checksum: Mapped[str] = mapped_column(sa.String(128), index=True)
+    tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    compatible_roles_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(sa.String(200), index=True)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, default=True, index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+
+
+class SkillLoadRow(Base):
+    __tablename__ = "skill_loads"
+
+    load_id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(
+        sa.ForeignKey("skills.skill_id", ondelete="RESTRICT"), index=True
+    )
+    run_id: Mapped[str] = mapped_column(sa.String(36), index=True)
+    flow_id: Mapped[str] = mapped_column(sa.ForeignKey("flows.id", ondelete="RESTRICT"), index=True)
+    agent_instance_id: Mapped[str | None] = mapped_column(sa.String(36), nullable=True, index=True)
+    reason: Mapped[str] = mapped_column(sa.Text, default="")
+    loaded_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+    unloaded_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True, index=True)
+
+
+class TodoRow(Base):
+    __tablename__ = "task_todos"
+
+    todo_id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(sa.String(36), index=True)
+    flow_id: Mapped[str] = mapped_column(sa.ForeignKey("flows.id", ondelete="RESTRICT"), index=True)
+    task_id: Mapped[str | None] = mapped_column(sa.String(36), nullable=True, index=True)
+    agent_instance_id: Mapped[str | None] = mapped_column(sa.String(36), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(sa.String(500))
+    description: Mapped[str] = mapped_column(sa.Text, default="")
+    status: Mapped[str] = mapped_column(sa.String(30), index=True)
+    priority: Mapped[int] = mapped_column(sa.Integer, index=True)
+    position: Mapped[int] = mapped_column(sa.Integer, default=0)
+    depends_on_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    evidence_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+
+
+class NoteRow(Base):
+    __tablename__ = "task_notes"
+
+    note_id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(sa.String(36), index=True)
+    flow_id: Mapped[str] = mapped_column(sa.ForeignKey("flows.id", ondelete="RESTRICT"), index=True)
+    agent_instance_id: Mapped[str | None] = mapped_column(sa.String(36), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(sa.String(30), index=True)
+    content: Mapped[str] = mapped_column(sa.Text)
+    status: Mapped[str] = mapped_column(sa.String(30), index=True)
+    evidence_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)
+
+
+class ContextSnapshotRow(Base):
+    __tablename__ = "context_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(sa.String(36), index=True)
+    flow_id: Mapped[str] = mapped_column(sa.ForeignKey("flows.id", ondelete="RESTRICT"), index=True)
+    agent_instance_id: Mapped[str | None] = mapped_column(sa.String(36), nullable=True, index=True)
+    source_from_sequence: Mapped[int] = mapped_column(sa.Integer)
+    source_to_sequence: Mapped[int] = mapped_column(sa.Integer, index=True)
+    estimated_tokens_before: Mapped[int] = mapped_column(sa.Integer)
+    estimated_tokens_after: Mapped[int] = mapped_column(sa.Integer)
+    narrative_summary: Mapped[str] = mapped_column(sa.Text)
+    structured_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utc_now)

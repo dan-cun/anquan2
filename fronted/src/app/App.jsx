@@ -3,6 +3,7 @@ import {
   ApiOutlined,
   AuditOutlined,
   CheckCircleOutlined,
+  CarryOutOutlined,
   CloudServerOutlined,
   CodeOutlined,
   DatabaseOutlined,
@@ -30,11 +31,11 @@ import {
   Layout,
   Menu,
   Modal,
+  Segmented,
   Select,
   Space,
   Spin,
   Tag,
-  Timeline,
   Tooltip,
   Typography,
 } from 'antd'
@@ -58,6 +59,10 @@ import {
   nativeCollaborationState,
 } from './agentNetwork.js'
 import { loadNativeNetwork } from './graphql.js'
+import { ControlStarfield } from './ControlStarfield.jsx'
+import { AgentGraphControls } from './features/agentGraph/AgentGraphControls.jsx'
+import { LiveFeed } from './LiveFeed.jsx'
+import { projectLiveFeedEvent } from './liveFeed.js'
 import { flowStatusFromEvent, toConversationItem } from './conversationEvents.js'
 import {
   buildFlowWebSocketUrl,
@@ -78,12 +83,16 @@ const McpManagementPage = lazy(() => import('./pages/McpManagementPage.jsx').the
 const PromptManagementPage = lazy(() => import('./pages/PromptManagementPage.jsx').then((module) => ({
   default: module.PromptManagementPage,
 })))
+const LongTermStatePage = lazy(() => import('./pages/LongTermStatePage.jsx').then((module) => ({
+  default: module.LongTermStatePage,
+})))
 
 const navigationItems = [
   { key: 'workbench', icon: <TeamOutlined />, label: '协作工作台' },
   { key: 'audit', icon: <AuditOutlined />, label: '审计回放' },
   { key: 'prompts', icon: <FileTextOutlined />, label: 'Prompt 目录' },
   { key: 'mcp', icon: <DeploymentUnitOutlined />, label: 'MCP 与工具' },
+  { key: 'state', icon: <CarryOutOutlined />, label: '长期任务状态' },
   { key: 'models', icon: <ApiOutlined />, label: '模型与用量' },
   { key: 'entry', icon: <HomeOutlined />, label: '视觉入口' },
 ]
@@ -159,6 +168,17 @@ function compactId(value) {
   return value.length > 14 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value
 }
 
+function mergeLedgerEntries(current, incoming) {
+  const merged = new Map()
+  for (const entry of [...current, ...incoming]) {
+    const key = entry.seq || entry.sequence || entry.hash
+    if (key !== undefined && key !== null) merged.set(String(key), entry)
+  }
+  return [...merged.values()].sort(
+    (left, right) => (left.seq || left.sequence || 0) - (right.seq || right.sequence || 0),
+  )
+}
+
 function StatusTag({ status }) {
   const [color, label] = statusLabels[status] || ['default', status || '未知']
   return <Tag color={color}>{label}</Tag>
@@ -175,6 +195,7 @@ function agentStatusLabel(status) {
     active: '处理中',
     completed: '已参与',
     waiting: '等待确认',
+    cancelled: '已停止',
     failed: '异常',
   }[status] || status
 }
@@ -249,6 +270,7 @@ function WorkbenchPage() {
   const [connectionStatus, setConnectionStatus] = useState('idle')
   const [isSending, setIsSending] = useState(false)
   const [lastStage, setLastStage] = useState('等待任务')
+  const [centerView, setCenterView] = useState('feed')
 
   const socketRef = useRef(null)
   const pendingMessagesRef = useRef([])
@@ -577,11 +599,22 @@ function WorkbenchPage() {
             <Title level={4}>{activeFlow?.title || '选择或创建流程'}</Title>
           </div>
           <Space size={6} wrap>
+            <Segmented
+              size="small"
+              value={centerView}
+              onChange={setCenterView}
+              options={[
+                { value: 'feed', label: '实时步骤', icon: <AuditOutlined /> },
+                { value: 'conversation', label: '对话', icon: <MessageOutlined /> },
+              ]}
+              aria-label="工作台中心视图"
+            />
             <ConnectionTag status={connectionStatus} />
             {activeFlow ? <StatusTag status={activeFlow.status} /> : null}
             {activeFlow?.id ? (
               <Tooltip title="打开审计回放">
                 <Button
+                  className="audit-open-button"
                   type="text"
                   icon={<AuditOutlined />}
                   aria-label="打开审计回放"
@@ -604,37 +637,41 @@ function WorkbenchPage() {
           ))}
         </div>
 
-        <div className="message-viewport">
-          {conversationItems.length === 0 ? (
-            <div className="empty-workbench">
-              <RobotOutlined />
-              <Title level={4}>提交一个授权范围内的安全任务</Title>
-              <Text type="secondary">运行进度、角色协作与证据事件会在此实时显示。</Text>
-            </div>
-          ) : (
-            <div className="event-stream">
-              {conversationItems.map((item) => (
-                <article className={`event-card is-${item.kind}`} key={item.key}>
-                  <div className="event-card__meta">
-                    <span>{item.label}</span>
-                    <Text type="secondary">{formatTime(item.timestamp)}</Text>
-                  </div>
-                  <div className="event-card__body">{item.body}</div>
-                  {item.report?.limitations?.length ? (
-                    <div className="event-card__limitations">
-                      <strong>限制</strong>
-                      <ul>
-                        {item.report.limitations.map((limitation) => (
-                          <li key={limitation}>{limitation}</li>
-                        ))}
-                      </ul>
+        {centerView === 'feed' ? (
+          <LiveFeed entries={ledgerEntries} className="workbench-live-feed" />
+        ) : (
+          <div className="message-viewport">
+            {conversationItems.length === 0 ? (
+              <div className="empty-workbench">
+                <RobotOutlined />
+                <Title level={4}>提交一个授权范围内的安全任务</Title>
+                <Text type="secondary">运行进度、角色协作与证据事件会在此实时显示。</Text>
+              </div>
+            ) : (
+              <div className="event-stream">
+                {conversationItems.map((item) => (
+                  <article className={`event-card is-${item.kind}`} key={item.key}>
+                    <div className="event-card__meta">
+                      <span>{item.label}</span>
+                      <Text type="secondary">{formatTime(item.timestamp)}</Text>
                     </div>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-          )}
-        </div>
+                    <div className="event-card__body">{item.body}</div>
+                    {item.report?.limitations?.length ? (
+                      <div className="event-card__limitations">
+                        <strong>限制</strong>
+                        <ul>
+                          {item.report.limitations.map((limitation) => (
+                            <li key={limitation}>{limitation}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="composer">
           <Input.TextArea
@@ -668,7 +705,14 @@ function WorkbenchPage() {
             <Text className="panel-kicker">COLLABORATION</Text>
             <Title level={4}>智能体网络</Title>
           </div>
-          <TeamOutlined className="heading-icon" />
+          <Space size="small">
+            <AgentGraphControls
+              flowId={activeFlow?.id}
+              network={nativeNetwork}
+              onChanged={() => loadNativeNetwork(activeFlow.id).then(setNativeNetwork)}
+            />
+            <TeamOutlined className="heading-icon" />
+          </Space>
         </div>
         <AgentNetwork state={networkState} />
         <div className="runtime-summary">
@@ -702,14 +746,6 @@ function WorkbenchPage() {
   )
 }
 
-function ledgerColor(eventType = '') {
-  if (eventType.startsWith('interrupt.')) return 'orange'
-  if (eventType.startsWith('input.')) return 'blue'
-  if (eventType.startsWith('flow.')) return 'green'
-  if (eventType.includes('failed') || eventType.includes('error')) return 'red'
-  return 'gray'
-}
-
 function AuditPage() {
   const { message } = AntApp.useApp()
   const { flowId } = useParams()
@@ -722,6 +758,7 @@ function AuditPage() {
   const [selectedEntry, setSelectedEntry] = useState(null)
   const [manualFlowId, setManualFlowId] = useState(flowId || '')
   const [loading, setLoading] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState('idle')
 
   const loadFlows = useCallback(async () => {
     const data = await listFlows()
@@ -756,7 +793,9 @@ function AuditPage() {
       setEntries(entryData)
       setVerifyResult(verifyData)
       setAnchors(anchorData)
-      setSelectedEntry(entryData[0] || null)
+      setSelectedEntry((current) => (
+        entryData.find((entry) => entry.seq === current?.seq) || entryData[0] || null
+      ))
     } catch (error) {
       message.error(`账本加载失败：${error.message}`)
     } finally {
@@ -768,7 +807,76 @@ function AuditPage() {
     loadLedger(selectedFlowId)
   }, [loadLedger, selectedFlowId])
 
+  useEffect(() => {
+    if (!selectedFlowId) return undefined
+    let disposed = false
+    let socket = null
+    let reconnectTimer = null
+    let heartbeatTimer = null
+    let reconnectAttempt = 0
+
+    const connect = () => {
+      if (disposed) return
+      setConnectionStatus('connecting')
+      socket = new WebSocket(buildFlowWebSocketUrl(WS_BASE_URL, selectedFlowId, 0))
+
+      socket.addEventListener('open', () => {
+        if (disposed) return
+        reconnectAttempt = 0
+        setConnectionStatus('connected')
+        heartbeatTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'client.ping',
+              flow_id: selectedFlowId,
+              request_id: makeRequestId(),
+              payload: {},
+            }))
+          }
+        }, 30000)
+      })
+
+      socket.addEventListener('message', (raw) => {
+        if (disposed) return
+        try {
+          const event = JSON.parse(raw.data)
+          if (event.type === 'server.connected') setConnectionStatus('connected')
+          const entry = event.payload?.entry || event.payload?.ledger_entry
+          if (!entry) return
+          setEntries((current) => mergeLedgerEntries(current, [entry]))
+          setSelectedEntry((current) => current || entry)
+        } catch {
+          setConnectionStatus('error')
+        }
+      })
+
+      socket.addEventListener('close', () => {
+        if (disposed) return
+        if (heartbeatTimer) window.clearInterval(heartbeatTimer)
+        setConnectionStatus('disconnected')
+        reconnectTimer = window.setTimeout(connect, Math.min(1000 * 2 ** reconnectAttempt, 10000))
+        reconnectAttempt += 1
+      })
+
+      socket.addEventListener('error', () => {
+        if (!disposed) setConnectionStatus('error')
+      })
+    }
+
+    connect()
+    return () => {
+      disposed = true
+      if (reconnectTimer) window.clearTimeout(reconnectTimer)
+      if (heartbeatTimer) window.clearInterval(heartbeatTimer)
+      socket?.close()
+    }
+  }, [selectedFlowId])
+
   function handleSelectFlow(id) {
+    setEntries([])
+    setSelectedEntry(null)
+    setVerifyResult(null)
+    setAnchors([])
     setSelectedFlowId(id)
     setManualFlowId(id)
     navigate(`/audit/${id}`)
@@ -780,19 +888,10 @@ function AuditPage() {
   )
   const auditDownloadUrl = `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(auditJsonl || '\n')}`
 
-  const timelineItems = entries.map((entry) => ({
-    color: ledgerColor(entry.event_type),
-    children: (
-      <button
-        className={`timeline-entry ${selectedEntry?.seq === entry.seq ? 'is-active' : ''}`}
-        type="button"
-        onClick={() => setSelectedEntry(entry)}
-      >
-        <span className="timeline-entry__title">#{entry.seq} {entry.event_type}</span>
-        <span className="timeline-entry__meta">{entry.actor} · {formatTime(entry.created_at)}</span>
-      </button>
-    ),
-  }))
+  const selectedProjection = useMemo(
+    () => selectedEntry ? projectLiveFeedEvent(selectedEntry) : null,
+    [selectedEntry],
+  )
 
   return (
     <div className="audit-page">
@@ -834,6 +933,7 @@ function AuditPage() {
       </div>
 
       <div className="audit-status-band">
+        <ConnectionTag status={connectionStatus} />
         {verifyResult?.valid ? (
           <Tag icon={<CheckCircleOutlined />} color="success">哈希链有效</Tag>
         ) : (
@@ -847,15 +947,21 @@ function AuditPage() {
         <section className="timeline-panel app-panel">
           <div className="panel-heading">
             <div>
-              <Text className="panel-kicker">EVENTS</Text>
-              <Title level={4}>事件时间线</Title>
+              <Text className="panel-kicker">LIVE FEED</Text>
+              <Title level={4}>实时步骤流</Title>
             </div>
           </div>
-          <div className="timeline-scroll">
-            {loading ? <Spin /> : timelineItems.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无账本数据" />
-            ) : <Timeline items={timelineItems} />}
-          </div>
+          {loading && entries.length === 0 ? (
+            <div className="timeline-scroll"><Spin /></div>
+          ) : (
+            <LiveFeed
+              entries={entries}
+              selectedEventId={selectedProjection?.id}
+              onSelect={(row) => setSelectedEntry(row.source)}
+              emptyText="暂无账本数据"
+              className="audit-live-feed"
+            />
+          )}
         </section>
 
         <aside className="detail-panel app-panel">
@@ -870,16 +976,20 @@ function AuditPage() {
             column={1}
             items={[
               { key: 'seq', label: '序号', children: selectedEntry?.seq || '-' },
-              { key: 'type', label: '事件', children: selectedEntry?.event_type || '-' },
-              { key: 'actor', label: '执行者', children: selectedEntry?.actor || '-' },
-              { key: 'time', label: '时间', children: selectedEntry?.created_at || '-' },
+              { key: 'runtimeSeq', label: '运行序号', children: selectedProjection?.runtimeSequence || '-' },
+              { key: 'type', label: '事件', children: selectedProjection?.eventType || '-' },
+              { key: 'actor', label: '执行者', children: selectedProjection?.actor || '-' },
+              { key: 'time', label: '时间', children: selectedProjection?.timestamp || '-' },
+              { key: 'correlation', label: '关联操作', children: compactId(selectedProjection?.correlationId) },
+              { key: 'decision', label: '决策', children: compactId(selectedProjection?.decisionId) },
+              { key: 'tool', label: '工具调用', children: compactId(selectedProjection?.toolId) },
               { key: 'hash', label: '哈希', children: compactId(selectedEntry?.hash) },
               { key: 'prev', label: '前序哈希', children: compactId(selectedEntry?.prev_hash) },
             ]}
           />
           <div className="payload-block">
             <Text type="secondary">Payload</Text>
-            <pre>{JSON.stringify(selectedEntry?.payload || {}, null, 2)}</pre>
+            <pre>{JSON.stringify(selectedProjection?.payload || {}, null, 2)}</pre>
           </div>
           <div className="payload-block">
             <Text type="secondary">校验结果</Text>
@@ -901,6 +1011,8 @@ function AppLayout() {
       ? 'prompts'
       : location.pathname.startsWith('/mcp')
         ? 'mcp'
+        : location.pathname.startsWith('/state')
+          ? 'state'
         : location.pathname.startsWith('/models') ? 'models' : 'workbench'
 
   useEffect(() => {
@@ -911,12 +1023,14 @@ function AppLayout() {
     audit: ['审计回放', <AuditOutlined key="audit" />],
     prompts: ['Prompt 目录', <FileTextOutlined key="prompts" />],
     mcp: ['MCP 与工具', <DeploymentUnitOutlined key="mcp" />],
+    state: ['长期任务状态', <CarryOutOutlined key="state" />],
     models: ['模型与用量', <ApiOutlined key="models" />],
     workbench: ['智能体协作工作台', <TeamOutlined key="workbench" />],
   }[selectedKey]
 
   return (
     <Layout className="feature-shell">
+      <ControlStarfield />
       <Sider width={190} breakpoint="lg" collapsedWidth={60} className="app-sider">
         <div className="product-mark">
           <SafetyCertificateOutlined />
@@ -957,6 +1071,7 @@ function AppLayout() {
               <Route path="/audit/:flowId" element={<AuditPage />} />
               <Route path="/prompts" element={<PromptManagementPage />} />
               <Route path="/mcp" element={<McpManagementPage />} />
+              <Route path="/state" element={<LongTermStatePage />} />
               <Route path="/models" element={<ModelUsagePage />} />
               <Route path="*" element={<Navigate to="/workbench" replace />} />
             </Routes>

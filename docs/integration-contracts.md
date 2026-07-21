@@ -39,6 +39,7 @@ integration branch performs dependency injection after accepting a handoff.
 ## Contract Versions
 
 - Runtime state schema: `app.schemas.runtime.SCHEMA_VERSION`.
+- Runtime event envelope: `app.schemas.runtime.EVENT_CONTRACT_VERSION` (`1.1`).
 - WebSocket protocol: `app.schemas.events.WS_PROTOCOL_VERSION`.
 - Native Agent contract: `NATIVE_AGENT_CONTRACT_VERSION`.
 - Unified tool contract: `NATIVE_TOOL_CONTRACT_VERSION`.
@@ -65,6 +66,10 @@ additional roles only through an additive contract proposal.
 
 Agent delegation is a first-class operation, not a synthetic tool call. Every delegation must
 create an `AgentDelegation`, emit `agent.delegated`, and eventually produce an `AgentResult`.
+
+Agent Graph create/message/wait/stop behavior and status transitions are defined in
+`docs/contracts/agent-graph-control.md`. The control plane is additive and may not wake terminal
+Agent instances or cross `run_id`/`flow_id` boundaries.
 
 ## MCP and Unified Tool Contract
 
@@ -119,6 +124,10 @@ change nullability without integration approval.
 Canonical event names are `RuntimeEventType` values. The ledger stores the string value so
 historical and extension events remain readable.
 
+The normative DTO, public decision fields, ordering invariants, tool terminal states, and
+verification verdicts are frozen in `docs/contracts/runtime-event-contract.md`. All new event
+producers and projectors must consume that contract rather than defining transport-specific DTOs.
+
 New native groups include:
 
 - `flow.*`, `task.*`, `subtask.*`
@@ -145,6 +154,8 @@ must consume the same event hub and ledger sequence.
 - `SECMIND_GRAPHQL_PATH`: GraphQL HTTP/WebSocket path.
 - `SECMIND_AGENT_MAX_PARALLEL`: configurable native Agent concurrency.
 - `SECMIND_AGENT_MAX_DELEGATION_DEPTH`: configurable delegation recursion boundary.
+- `SECMIND_EVENT_STREAM_BATCH_SIZE`: number of persisted events read per cursor batch.
+- `SECMIND_EVENT_STREAM_POLL_INTERVAL_SECONDS`: recovery poll when a wake notification is absent.
 - `SECMIND_MCP_CONFIG_FILE`: optional native MCP server configuration.
 - `SECMIND_MCP_*_TIMEOUT_SECONDS`: connection/call runtime timeouts.
 - `SECMIND_MCP_REFRESH_INTERVAL_SECONDS`: capability refresh interval.

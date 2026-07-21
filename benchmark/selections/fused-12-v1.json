@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "selection_id": "fused-12-v1",
+  "dataset_sha256": "6964a35b951433edf063a81e54c32929973572d9c885bfb2d4ad25aee7e95b45",
+  "strategy": "Eight-category stratified sample with four additional source/mode coverage cases",
+  "case_count": 12,
+  "cases": [
+    {
+      "case_id": "CY-WEB-01",
+      "category": "Web安全",
+      "source": "CyBench",
+      "difficulty": "易",
+      "required_capabilities": ["isolated_target", "workspace_shell", "http_client"]
+    },
+    {
+      "case_id": "NYU-WEB-02",
+      "category": "Web安全",
+      "source": "NYU CTF Bench",
+      "difficulty": "难",
+      "required_capabilities": ["isolated_target", "workspace_shell", "browser", "http_client"]
+    },
+    {
+      "case_id": "NYU-PWN-01",
+      "category": "二进制利用",
+      "source": "NYU CTF Bench",
+      "difficulty": "易",
+      "required_capabilities": ["isolated_target", "workspace_shell", "binary_analysis"]
+    },
+    {
+      "case_id": "CY-REV-01",
+      "category": "逆向分析",
+      "source": "CyBench",
+      "difficulty": "易",
+      "required_capabilities": ["workspace_shell", "binary_analysis"]
+    },
+    {
+      "case_id": "NYU-REV-02",
+      "category": "逆向分析",
+      "source": "NYU CTF Bench",
+      "difficulty": "易",
+      "required_capabilities": ["workspace_shell", "binary_analysis"]
+    },
+    {
+      "case_id": "CY-CRY-02",
+      "category": "密码学",
+      "source": "CyBench",
+      "difficulty": "易",
+      "required_capabilities": ["workspace_shell", "python_executor"]
+    },
+    {
+      "case_id": "NYU-CRY-02",
+      "category": "密码学",
+      "source": "NYU CTF Bench",
+      "difficulty": "中",
+      "required_capabilities": ["isolated_target", "workspace_shell", "python_executor"]
+    },
+    {
+      "case_id": "CY-DFIR-01",
+      "category": "数字取证与日志分析",
+      "source": "CyBench",
+      "difficulty": "易",
+      "required_capabilities": ["workspace_shell", "archive_analysis", "mail_analysis"]
+    },
+    {
+      "case_id": "BOTS-02",
+      "category": "数字取证与日志分析",
+      "source": "Splunk BOTS v3",
+      "difficulty": "难",
+      "required_capabilities": ["splunk_search", "evidence_export"]
+    },
+    {
+      "case_id": "CY-MISC-02",
+      "category": "Misc与沙箱",
+      "source": "CyBench",
+      "difficulty": "中",
+      "required_capabilities": ["isolated_target", "workspace_shell", "python_executor"]
+    },
+    {
+      "case_id": "BB-02",
+      "category": "真实仓库漏洞",
+      "source": "BountyBench",
+      "difficulty": "中",
+      "required_capabilities": ["workspace_shell", "javascript_analysis", "poc_executor"]
+    },
+    {
+      "case_id": "DOJO-01",
+      "category": "Agent鲁棒性",
+      "source": "AgentDojo",
+      "difficulty": "中",
+      "required_capabilities": ["agentdojo_workspace", "prompt_injection_evaluator"]
+    }
+  ]
+}

@@ -16,17 +16,22 @@ from app.graphql.types import (
     Artifact,
     Assistant,
     CapabilityKind,
+    ContextSnapshot,
     Evidence,
     Finding,
     Flow,
     MCPCapability,
     MCPServer,
     MessageChain,
+    Note,
     PromptTemplate,
     Report,
     RuntimeEvent,
+    Skill,
+    SkillLoad,
     Subtask,
     Task,
+    Todo,
     ToolCall,
     UnifiedTool,
     UsageStats,
@@ -219,6 +224,63 @@ class Query:
         if prompt is None:
             raise GraphQLError("prompt not found", extensions={"code": "NOT_FOUND"})
         return prompt
+
+    @strawberry.field
+    async def skills(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        enabled: bool | None = strawberry.UNSET,
+    ) -> list[Skill]:
+        return list(
+            await get_backend(info).long_term.list_skills(
+                None if enabled is strawberry.UNSET else enabled
+            )
+        )
+
+    @strawberry.field
+    async def skill_loads(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        run_id: strawberry.ID,
+        agent_instance_id: strawberry.ID | None = strawberry.UNSET,
+    ) -> list[SkillLoad]:
+        return list(
+            await get_backend(info).long_term.list_skill_loads(
+                str(run_id),
+                None
+                if agent_instance_id is strawberry.UNSET or agent_instance_id is None
+                else str(agent_instance_id),
+            )
+        )
+
+    @strawberry.field
+    async def todos(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        run_id: strawberry.ID,
+    ) -> list[Todo]:
+        return list(await get_backend(info).long_term.list_todos(str(run_id)))
+
+    @strawberry.field
+    async def notes(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        run_id: strawberry.ID,
+        active_only: bool | None = True,
+    ) -> list[Note]:
+        return list(
+            await get_backend(info).long_term.list_notes(
+                str(run_id), True if active_only is None else active_only
+            )
+        )
+
+    @strawberry.field
+    async def context_snapshots(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        run_id: strawberry.ID,
+    ) -> list[ContextSnapshot]:
+        return list(await get_backend(info).long_term.list_context_snapshots(str(run_id)))
 
     @strawberry.field
     async def approvals(

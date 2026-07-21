@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -18,7 +20,10 @@ from app.schemas.runtime import (
     ApprovalRequest,
     ApprovalResponse,
     BudgetState,
+    CompletionMode,
     DecisionRecord,
+    EventContext,
+    Evidence,
     Finding,
     KnowledgeHit,
     PlanStep,
@@ -37,33 +42,63 @@ from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import LLMMessage
 from llm.manager import LLMProviderManager
 from tools.runtime import RuntimeToolBroker
+from tools.safety import redact_tool_value
 
 if TYPE_CHECKING:
     from agents.langgraph_runtime import LangGraphRuntime
     from knowledge.service import QdrantKnowledgeService
 
 Publisher = Callable[[dict[str, Any]], Awaitable[None] | None]
+CollaborationRunner = Callable[[AgentState, int], Awaitable[dict[str, Any]]]
+TaskFinalizer = Callable[[str, RunStatus, dict[str, Any]], None]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEventSignal:
+    run_id: str
+    sequence: int
+    event_id: str
 
 
 class RuntimeEventHub:
     def __init__(self) -> None:
-        self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+        self._subscribers: dict[
+            str | None,
+            set[asyncio.Queue[RuntimeEventSignal]],
+        ] = defaultdict(set)
         self._lock = asyncio.Lock()
+        self._published = 0
+        self._coalesced = 0
 
     async def publish(self, event: dict[str, Any]) -> None:
+        run_id = str(event.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("runtime event requires run_id")
+        signal = RuntimeEventSignal(
+            run_id=run_id,
+            sequence=int(event.get("sequence") or 0),
+            event_id=str(event.get("event_id") or ""),
+        )
         async with self._lock:
-            subscribers = tuple(self._subscribers.get(str(event["run_id"]), ()))
-        for queue in subscribers:
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            queue.put_nowait(event)
+            subscribers = tuple(
+                self._subscribers.get(run_id, set()) | self._subscribers.get(None, set())
+            )
+            self._published += 1
+            for queue in subscribers:
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                        self._coalesced += 1
+                    except asyncio.QueueEmpty:
+                        pass
+                queue.put_nowait(signal)
 
     @asynccontextmanager
-    async def subscribe(self, run_id: str) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=500)
+    async def subscribe(
+        self,
+        run_id: str | None,
+    ) -> AsyncIterator[asyncio.Queue[RuntimeEventSignal]]:
+        queue: asyncio.Queue[RuntimeEventSignal] = asyncio.Queue(maxsize=1)
         async with self._lock:
             self._subscribers[run_id].add(queue)
         try:
@@ -71,6 +106,16 @@ class RuntimeEventHub:
         finally:
             async with self._lock:
                 self._subscribers[run_id].discard(queue)
+                if not self._subscribers[run_id]:
+                    self._subscribers.pop(run_id, None)
+
+    async def stats(self) -> dict[str, int]:
+        async with self._lock:
+            return {
+                "subscribers": sum(len(items) for items in self._subscribers.values()),
+                "published": self._published,
+                "coalesced_notifications": self._coalesced,
+            }
 
 
 class RuntimeRunService:
@@ -102,6 +147,14 @@ class RuntimeRunService:
         self.knowledge_service = knowledge_service
         self._graph_runtime: LangGraphRuntime | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._collaboration_runner: CollaborationRunner | None = None
+        self._task_finalizer: TaskFinalizer | None = None
+
+    def set_collaboration_runner(self, runner: CollaborationRunner) -> None:
+        self._collaboration_runner = runner
+
+    def set_task_finalizer(self, finalizer: TaskFinalizer) -> None:
+        self._task_finalizer = finalizer
 
     @property
     def graph_runtime(self) -> LangGraphRuntime:
@@ -115,22 +168,48 @@ class RuntimeRunService:
             )
         return self._graph_runtime
 
-    def submit(self, task: TaskRequest) -> str:
-        run_id = str(uuid4())
-        state = self.new_state(task, run_id)
+    def submit(
+        self,
+        task: TaskRequest,
+        *,
+        flow_id: str | None = None,
+        run_id: str | None = None,
+        task_id: str | None = None,
+    ) -> str:
+        run_id = run_id or str(uuid4())
+        state = self.new_state(task, run_id, flow_id=flow_id, task_id=task_id)
         self.ledger.save_state(state)
         self.ledger.append(run_id, "run.queued", {"objective": task.objective}, actor="api")
         self._spawn(self._start_state(state))
         return run_id
 
-    async def prepare_run(self, task: TaskRequest, run_id: str | None = None) -> AgentState:
-        state = self.new_state(task, run_id or str(uuid4()))
+    async def prepare_run(
+        self,
+        task: TaskRequest,
+        run_id: str | None = None,
+        *,
+        flow_id: str | None = None,
+        task_id: str | None = None,
+    ) -> AgentState:
+        state = self.new_state(
+            task,
+            run_id or str(uuid4()),
+            flow_id=flow_id,
+            task_id=task_id,
+        )
         self.ledger.save_state(state)
         await self._event(state, "run.queued", {"objective": task.objective}, actor="api")
         return state
 
-    async def run_inline(self, task: TaskRequest, run_id: str | None = None) -> AgentState:
-        state = await self.prepare_run(task, run_id)
+    async def run_inline(
+        self,
+        task: TaskRequest,
+        run_id: str | None = None,
+        *,
+        flow_id: str | None = None,
+        task_id: str | None = None,
+    ) -> AgentState:
+        state = await self.prepare_run(task, run_id, flow_id=flow_id, task_id=task_id)
         return await self._start_state(state)
 
     async def resume_inline(self, run_id: str, response: ApprovalResponse) -> AgentState:
@@ -154,12 +233,19 @@ class RuntimeRunService:
         state = self.state(run_id)
         return RunSummary(
             run_id=run_id,
+            flow_id=state.flow_id,
+            task_id=state.task_id,
             status=state.status,
             scenario=state.scenario,
             current_step=state.current_step_index,
             total_steps=len(state.plan),
             active_step_id=state.active_step_id,
             verification_passed=state.verification_passed,
+            completion_mode=state.completion_mode,
+            final_answer_verified=state.final_answer_verified,
+            review_round=state.review_round,
+            review_converged=state.review_converged,
+            completion_gate_reason=state.completion_gate_reason,
             state_revision=state.state_revision,
             pending_approval=state.pending_approval,
             last_error=state.last_error,
@@ -178,10 +264,20 @@ class RuntimeRunService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def new_state(self, task: TaskRequest, run_id: str) -> AgentState:
+    def new_state(
+        self,
+        task: TaskRequest,
+        run_id: str,
+        *,
+        flow_id: str | None = None,
+        task_id: str | None = None,
+    ) -> AgentState:
         return AgentState(
             run_id=run_id,
+            flow_id=flow_id or run_id,
+            task_id=task_id,
             task=task,
+            completion_mode=self._completion_mode(task),
             status=RunStatus.PENDING,
             budget=BudgetState(
                 max_steps=self.settings.runtime_max_steps,
@@ -252,6 +348,35 @@ class RuntimeRunService:
             )
         )
         return await self._checkpoint(state, "scenario.classified", {"scenario": scenario})
+
+    async def node_collaborate(self, state: AgentState) -> AgentState:
+        if state.collaboration_completed:
+            return state
+        if self._collaboration_runner is None:
+            state.collaboration_completed = True
+            return await self._checkpoint(
+                state,
+                "collaboration.skipped",
+                {"reason": "No native collaboration runner is configured"},
+            )
+        try:
+            bundle = await self._collaboration_runner(state, 1)
+            self._merge_collaboration_bundle(state, bundle)
+            state.collaboration_completed = True
+        except Exception as error:
+            state.last_error = f"Native collaboration failed: {type(error).__name__}: {error}"
+        return await self._checkpoint(
+            state,
+            "collaboration.merged",
+            {
+                "round": 1,
+                "agent_result_count": len(state.agent_results),
+                "finding_count": len(state.findings),
+                "evidence_count": len(state.evidence),
+                "tool_call_count": len(state.tool_calls),
+                "error": state.last_error,
+            },
+        )
 
     async def node_retrieve_context(self, state: AgentState) -> AgentState:
         source = "disabled"
@@ -357,7 +482,7 @@ class RuntimeRunService:
 
     async def node_select_step(self, state: AgentState) -> tuple[AgentState, str]:
         if state.current_step_index >= len(state.plan):
-            return await self._checkpoint(state, "step.selection_complete", {}), "report"
+            return await self._checkpoint(state, "step.selection_complete", {}), "secondary_review"
         elapsed = (datetime.now(UTC) - state.started_at).total_seconds()
         if elapsed >= state.budget.max_runtime_seconds:
             state.status = RunStatus.PARTIAL
@@ -544,7 +669,7 @@ class RuntimeRunService:
             {
                 "tool": tool_name,
                 "tool_version": self.broker.registry.get(tool_name).manifest.version,
-                "args": step.inputs,
+                "args": redact_tool_value(step.inputs),
                 "step_id": step.step_id,
                 "attempt": attempt,
                 "execution_key": execution_key,
@@ -561,9 +686,16 @@ class RuntimeRunService:
             ),
         )
         state.observations.append(result)
+        terminal_event = {
+            ToolStatus.SUCCESS: "tool.completed",
+            ToolStatus.TIMEOUT: "tool.timed_out",
+            ToolStatus.DENIED: "tool.blocked",
+        }.get(result.status, "tool.failed")
+        if result.error_code == "TOOL_CIRCUIT_OPEN":
+            terminal_event = "tool.blocked"
         return await self._checkpoint(
             state,
-            "tool.completed",
+            terminal_event,
             {
                 "tool": tool_name,
                 "step_id": step.step_id,
@@ -682,7 +814,7 @@ class RuntimeRunService:
                 state.completed_step_ids.append(step.step_id)
             state.current_step_index += 1
             state.active_step_id = None
-            route = "next" if state.current_step_index < len(state.plan) else "report"
+            route = "next" if state.current_step_index < len(state.plan) else "secondary_review"
         else:
             state.last_error = (
                 "Verifier rejected the tool result or its evidence references"
@@ -715,6 +847,87 @@ class RuntimeRunService:
             {"step_id": step.step_id, "route": route, "error": state.last_error},
         ), route
 
+    async def node_secondary_review(self, state: AgentState) -> AgentState:
+        baseline = {self._finding_fingerprint(item) for item in state.findings}
+        state.review_round = 1
+        state.review_finding_fingerprints = sorted(baseline)
+        await self._checkpoint(
+            state,
+            "review.completed",
+            {"round": 1, "finding_fingerprints": state.review_finding_fingerprints},
+        )
+
+        review_error: str | None = None
+        if self._collaboration_runner is not None:
+            try:
+                bundle = await self._collaboration_runner(state, 2)
+                self._merge_collaboration_bundle(state, bundle)
+            except Exception as error:
+                review_error = f"Secondary review failed: {type(error).__name__}: {error}"
+                state.last_error = review_error
+
+        current = {self._finding_fingerprint(item) for item in state.findings}
+        new_fingerprints = sorted(current - baseline)
+        state.review_round = 2
+        state.review_converged = review_error is None and not new_fingerprints
+        state.review_finding_fingerprints = sorted(current)
+        return await self._checkpoint(
+            state,
+            "review.completed",
+            {
+                "round": 2,
+                "new_finding_fingerprints": new_fingerprints,
+                "converged": state.review_converged,
+                "error": review_error,
+            },
+        )
+
+    async def node_completion_gate(self, state: AgentState) -> AgentState:
+        evidence_ids = {item.evidence_id for item in state.evidence}
+        verified_findings = [
+            item
+            for item in state.findings
+            if item.evidence_ids and set(item.evidence_ids).issubset(evidence_ids)
+        ]
+        if not state.review_converged:
+            passed = False
+            reason = "Secondary review did not converge without new findings"
+        elif state.completion_mode == CompletionMode.FINDINGS:
+            passed = bool(verified_findings)
+            reason = (
+                f"Completion gate passed with {len(verified_findings)} verified finding(s)"
+                if passed
+                else "Finding task requires at least one finding backed by recorded evidence"
+            )
+        else:
+            passed = bool(state.final_answer and state.final_answer_verified)
+            reason = (
+                "Completion gate passed with a verified final answer"
+                if passed
+                else (
+                    "Answer task requires both a final answer and an independent "
+                    "verification result"
+                )
+            )
+        state.verification_passed = passed
+        state.completion_gate_reason = reason
+        if not passed and state.status not in {RunStatus.DENIED, RunStatus.FAILED}:
+            state.status = RunStatus.PARTIAL
+            state.last_error = reason
+        return await self._checkpoint(
+            state,
+            "completion.gate_evaluated",
+            {
+                "passed": passed,
+                "mode": state.completion_mode.value,
+                "verified_finding_ids": [item.finding_id for item in verified_findings],
+                "final_answer_present": bool(state.final_answer),
+                "final_answer_verified": state.final_answer_verified,
+                "review_converged": state.review_converged,
+                "reason": reason,
+            },
+        )
+
     async def node_reflect(self, state: AgentState) -> AgentState:
         step = state.plan[state.current_step_index]
         state.retry_counts[step.step_id] = state.retry_counts.get(step.step_id, 0) + 1
@@ -740,17 +953,17 @@ class RuntimeRunService:
         successful = any(item.status == ToolStatus.SUCCESS for item in state.observations)
         if state.status in {RunStatus.DENIED, RunStatus.FAILED}:
             final_status = state.status
-        elif state.scenario != Scenario.CODE_AUDIT or not successful:
-            final_status = RunStatus.PARTIAL
-        else:
+        elif state.verification_passed is True and state.review_converged:
             final_status = RunStatus.COMPLETED
+        else:
+            final_status = RunStatus.PARTIAL
         limitations: list[str] = []
-        if state.scenario != Scenario.CODE_AUDIT:
-            limitations.append("The selected scenario is not enabled in the MVP tool chain.")
         if not state.input_artifacts:
             limitations.append(
                 "No input artifacts were supplied; the workspace may contain no analyzable code."
             )
+        if state.completion_gate_reason and final_status != RunStatus.COMPLETED:
+            limitations.append(state.completion_gate_reason)
         if state.last_error:
             limitations.append(state.last_error)
         fallback = (
@@ -782,20 +995,43 @@ class RuntimeRunService:
         state.completed_at = datetime.now(UTC)
         state.report = AgentReport(
             run_id=state.run_id,
+            flow_id=state.flow_id,
+            task_id=state.task_id,
             status=final_status,
             executive_summary=model_summary or fallback,
             findings=state.findings,
             decisions=state.decisions,
             evidence=state.evidence,
+            agent_results=state.agent_results,
+            artifacts=state.artifacts,
+            tool_calls=state.tool_calls,
+            final_answer=state.final_answer,
+            final_answer_verified=state.final_answer_verified,
+            completion_mode=state.completion_mode,
+            review_rounds=state.review_round,
+            review_converged=state.review_converged,
+            completion_gate_reason=state.completion_gate_reason,
             limitations=limitations,
         )
+        if self._task_finalizer is not None and state.task_id is not None:
+            self._task_finalizer(
+                state.task_id,
+                final_status,
+                state.report.model_dump(mode="json"),
+            )
         return await self._checkpoint(
             state,
             "report.generated",
             {
                 "status": state.status,
+                "flow_id": state.flow_id,
+                "task_id": state.task_id,
                 "finding_count": len(state.findings),
                 "evidence_count": len(state.evidence),
+                "agent_result_count": len(state.agent_results),
+                "artifact_count": len(state.artifacts),
+                "tool_call_count": len(state.tool_calls),
+                "completion_gate_reason": state.completion_gate_reason,
             },
         )
 
@@ -924,6 +1160,8 @@ class RuntimeRunService:
         # stage I/O in explicit graph audit events.
         if stage == "report":
             provider_kwargs["run_id"] = state.run_id
+            provider_kwargs["flow_id"] = state.flow_id
+            provider_kwargs["task_id"] = state.task_id
         else:
             await self._event(
                 state,
@@ -971,6 +1209,148 @@ class RuntimeRunService:
                 actor="llm_provider",
             )
         return response.content.strip() or None
+
+    @staticmethod
+    def _completion_mode(task: TaskRequest) -> CompletionMode:
+        text = " ".join([task.objective, *task.expected_outputs]).lower()
+        answer_terms = (
+            "final_answer",
+            "final answer",
+            "flag",
+            "solution",
+            "solve",
+            "\u7b54\u6848",
+            "\u89e3\u9898",
+        )
+        return (
+            CompletionMode.FINAL_ANSWER
+            if any(term in text for term in answer_terms)
+            else CompletionMode.FINDINGS
+        )
+
+    @staticmethod
+    def _finding_fingerprint(finding: Finding) -> str:
+        normalized = "\n".join(
+            str(value or "").strip().lower()
+            for value in (
+                finding.rule_id,
+                finding.path,
+                finding.line,
+                finding.title,
+                finding.description,
+            )
+        )
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _merge_collaboration_bundle(
+        self,
+        state: AgentState,
+        bundle: dict[str, Any],
+    ) -> None:
+        result = bundle.get("agent_result")
+        if isinstance(result, dict):
+            result_key = (
+                str(result.get("agent_instance_id") or ""),
+                str(result.get("completed_at") or ""),
+            )
+            known_results = {
+                (
+                    str(item.get("agent_instance_id") or ""),
+                    str(item.get("completed_at") or ""),
+                )
+                for item in state.agent_results
+            }
+            if result_key not in known_results:
+                state.agent_results.append(result)
+            data = result.get("data")
+            if isinstance(data, dict):
+                self._merge_answer_contract(state, data, allow_verification=False)
+            state.artifact_refs = sorted(
+                set(state.artifact_refs) | {str(item) for item in result.get("artifact_refs", [])}
+            )
+            state.collaboration_evidence_ids = sorted(
+                set(state.collaboration_evidence_ids)
+                | {str(item) for item in result.get("evidence_ids", [])}
+            )
+            state.collaboration_finding_ids = sorted(
+                set(state.collaboration_finding_ids)
+                | {str(item) for item in result.get("finding_ids", [])}
+            )
+
+        known_artifacts = {
+            str(item.get("artifact_id") or item.get("uri") or "") for item in state.artifacts
+        }
+        for artifact in bundle.get("artifacts", []):
+            if not isinstance(artifact, dict):
+                continue
+            key = str(artifact.get("artifact_id") or artifact.get("uri") or "")
+            if key and key not in known_artifacts:
+                state.artifacts.append(artifact)
+                known_artifacts.add(key)
+                state.artifact_refs.append(key)
+        state.artifact_refs = sorted(set(state.artifact_refs))
+
+        known_evidence = {item.evidence_id for item in state.evidence}
+        for item in bundle.get("evidence", []):
+            evidence = Evidence.model_validate(item)
+            if evidence.evidence_id not in known_evidence:
+                state.evidence.append(evidence)
+                known_evidence.add(evidence.evidence_id)
+        state.collaboration_evidence_ids = sorted(
+            set(state.collaboration_evidence_ids) | known_evidence
+        )
+
+        known_findings = {item.finding_id for item in state.findings}
+        for item in bundle.get("findings", []):
+            finding = Finding.model_validate(item)
+            if finding.finding_id not in known_findings:
+                state.findings.append(finding)
+                known_findings.add(finding.finding_id)
+        state.collaboration_finding_ids = sorted(
+            set(state.collaboration_finding_ids) | known_findings
+        )
+
+        known_tool_calls = {
+            str(item.get("invocation_id") or "") for item in state.tool_calls
+        }
+        for tool_call in bundle.get("tool_calls", []):
+            if not isinstance(tool_call, dict):
+                continue
+            invocation_id = str(tool_call.get("invocation_id") or "")
+            if invocation_id and invocation_id not in known_tool_calls:
+                state.tool_calls.append(tool_call)
+                state.tool_call_ids.append(invocation_id)
+                known_tool_calls.add(invocation_id)
+            data = tool_call.get("data")
+            if isinstance(data, dict):
+                self._merge_answer_contract(state, data, allow_verification=True)
+        state.tool_call_ids = sorted(set(state.tool_call_ids))
+
+    @staticmethod
+    def _merge_answer_contract(
+        state: AgentState,
+        data: dict[str, Any],
+        *,
+        allow_verification: bool,
+    ) -> None:
+        answer = next(
+            (
+                data.get(key)
+                for key in ("final_answer", "answer", "flag")
+                if isinstance(data.get(key), str) and data.get(key).strip()
+            ),
+            None,
+        )
+        if isinstance(answer, str):
+            state.final_answer = answer.strip()
+        if allow_verification:
+            verdict = data.get("verification_result", data.get("verdict"))
+            explicit = data.get("final_answer_verified", data.get("verification_passed"))
+            if explicit is True or (
+                isinstance(verdict, str)
+                and verdict.strip().lower() in {"confirmed", "passed", "verified", "valid"}
+            ):
+                state.final_answer_verified = True
 
     @staticmethod
     def _approval_response(raw: dict[str, Any]) -> ApprovalResponse:
@@ -1032,7 +1412,13 @@ class RuntimeRunService:
         payload: dict[str, Any],
         actor: str = "runtime",
     ) -> None:
-        event = self.ledger.append(state.run_id, event_type, payload, actor=actor)
+        event = self.ledger.append(
+            state.run_id,
+            event_type,
+            payload,
+            actor=actor,
+            context=EventContext(flow_id=state.flow_id, task_id=state.task_id),
+        )
         await self.event_hub.publish(event.model_dump(mode="json"))
 
     def _spawn(self, coroutine: Any) -> None:

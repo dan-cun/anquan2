@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from app.core.config import Settings
@@ -7,7 +9,19 @@ from app.schemas.events import (
     WSMessage,
     WSServerMessageType,
 )
-from app.schemas.runtime import AgentState, RuntimeEventType, TaskRequest
+from app.schemas.runtime import (
+    DECISION_REQUIRED_EVENT_TYPES,
+    EVENT_CONTRACT_VERSION,
+    TOOL_TERMINAL_EVENT_TYPES,
+    AgentState,
+    DecisionKind,
+    EventCategory,
+    EventContext,
+    EventEnvelope,
+    RuntimeEventType,
+    TaskRequest,
+    VerificationVerdict,
+)
 
 
 def test_agent_state_additive_contract_defaults() -> None:
@@ -55,9 +69,73 @@ def test_runtime_event_contract_covers_graph_and_flow_events() -> None:
         "mcp.capabilities_updated",
         "plan.revised",
         "prompt.imported",
+        "decision.recorded",
+        "agent.resumed",
+        "tool.timed_out",
+        "tool.blocked",
+        "verification.started",
+        "context.compressed",
+        "loop.detected",
+        "circuit.opened",
     }
 
     assert required <= {event.value for event in RuntimeEventType}
+
+
+def test_event_envelope_exposes_public_decision_without_private_reasoning() -> None:
+    envelope = EventEnvelope(
+        event_id="event-1",
+        run_id="run-1",
+        sequence=4,
+        event_type=RuntimeEventType.DECISION_RECORDED,
+        timestamp=datetime.now(UTC),
+        actor="primary_agent",
+        context=EventContext(
+            flow_id="flow-1",
+            correlation_id="operation-1",
+            decision_id="decision-1",
+        ),
+        payload={
+            "decision": {
+                "decision_id": "decision-1",
+                "kind": DecisionKind.TOOL,
+                "goal": "验证授权目标的服务暴露面",
+                "decision": "调用 mcp:scanner:scan",
+                "rationale_summary": "现有证据缺少端口状态，扫描可直接补齐该证据。",
+                "expected_outcome": "获得带时间戳的端口证据",
+                "risk_summary": "只读探测，范围限制为已授权目标。",
+            }
+        },
+    )
+
+    assert envelope.schema_version == EVENT_CONTRACT_VERSION
+    assert envelope.category == EventCategory.DECISION
+    assert envelope.decision is not None
+    assert envelope.decision.kind == DecisionKind.TOOL
+    assert envelope.decision.rationale_summary.startswith("现有证据")
+    assert envelope.model_dump().get("chain_of_thought") is None
+
+
+def test_operation_ordering_contract_sets_are_frozen() -> None:
+    assert {
+        "agent.delegated",
+        "agent.stop_requested",
+        "agent.completed",
+        "tool.started",
+        "run.completed",
+    } == DECISION_REQUIRED_EVENT_TYPES
+    assert {
+        "tool.completed",
+        "tool.failed",
+        "tool.timed_out",
+        "tool.cancelled",
+        "tool.blocked",
+    } == TOOL_TERMINAL_EVENT_TYPES
+    assert {item.value for item in VerificationVerdict} == {
+        "confirmed",
+        "rejected",
+        "inconclusive",
+    }
 
 
 def test_websocket_envelope_contract() -> None:

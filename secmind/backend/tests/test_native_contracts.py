@@ -182,6 +182,10 @@ def test_graphql_sdl_contains_native_operations() -> None:
         "registerMCPServer",
         "createPromptVersion",
         "delegateAgent",
+        "createAgent",
+        "sendAgentMessage",
+        "waitAgent",
+        "stopAgent",
         "agentDelegated",
         "runtimeEventAdded",
     }

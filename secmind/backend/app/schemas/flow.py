@@ -43,5 +43,6 @@ class ApprovalRequest(BaseModel):
 
 class FlowRunResponse(BaseModel):
     flow_id: str
+    run_id: str | None = None
+    task_id: str | None = None
     events: list[WSMessage]
-

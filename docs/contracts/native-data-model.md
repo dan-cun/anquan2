@@ -127,12 +127,28 @@ Native and MCP calls share this table and lifecycle.
 - `llm_calls`: Agent/model request metadata and sanitized I/O references.
 - `llm_usage`: token, cost, duration, Agent role, and model projections.
 
+### Long-term Task Tables
+
+- `skills`: versioned Skill content, checksum, tags, compatible roles, source, and enabled state.
+- `skill_loads`: per-run/per-Agent on-demand Skill load history.
+- `task_todos`: durable Todo lifecycle, dependencies, priority, and Evidence references.
+- `task_notes`: typed fact/hypothesis/constraint/decision/observation/error Notes.
+- `context_snapshots`: immutable structured context compression with source sequence cursors.
+
+The complete behavior is frozen in `docs/contracts/long-term-task-capabilities.md`.
+
 ## Runtime and Projection Tables
 
 - `runtime_runs` remains the serialized `AgentState` recovery snapshot.
-- `runtime_ledger_events` remains the append-only hash-chained runtime fact stream.
+- `runtime_ledger_events` remains the append-only hash-chained runtime fact stream. EventEnvelope
+  1.1 adds `schema_version`, `flow_id`, `correlation_id`, `causation_id`, `decision_id`,
+  `agent_instance_id`, `task_id`, `tool_invocation_id`, and `visibility`; legacy rows remain 1.0.
 - LangGraph checkpoint tables remain execution-resume internals.
 - `projection_*` tables are rebuildable GraphQL query views and are never a source of truth.
+
+The append-only `decision.recorded` event is the DecisionRecord fact. A future
+`projection_decisions` table may be built for queries, but no mutable decision fact table is
+permitted.
 
 ## Delete and Retention Semantics
 

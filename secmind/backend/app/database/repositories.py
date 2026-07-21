@@ -16,6 +16,7 @@ from app.database.models import (
     AgentMessageRow,
     ApprovalRow,
     ArtifactRow,
+    ContextSnapshotRow,
     EvidenceRow,
     FindingRow,
     FlowRow,
@@ -25,11 +26,15 @@ from app.database.models import (
     MCPServerRow,
     MessageChainRow,
     MessageEntryRow,
+    NoteRow,
     PromptRow,
     PromptVersionRow,
     ReportRow,
+    SkillLoadRow,
+    SkillRow,
     SubtaskRow,
     TaskRow,
+    TodoRow,
     ToolCallRow,
 )
 from app.schemas.agents import (
@@ -40,6 +45,15 @@ from app.schemas.agents import (
     AgentStatus,
 )
 from app.schemas.flow import Flow, FlowStatus
+from app.schemas.long_term import (
+    ContextSnapshot,
+    NoteRecord,
+    NoteStatus,
+    SkillDefinition,
+    SkillLoad,
+    StructuredContext,
+    TodoItem,
+)
 from app.schemas.mcp import (
     MCPCapability,
     MCPServerConfig,
@@ -216,6 +230,10 @@ class TaskRepository:
                     select(TaskRow).where(TaskRow.flow_id == flow_id).order_by(TaskRow.created_at)
                 ).all()
             )
+
+    def get_task(self, task_id: str) -> TaskRow | None:
+        with self.sessions() as session:
+            return session.get(TaskRow, task_id)
 
     def update_task(
         self,
@@ -1222,6 +1240,306 @@ class LLMRepository:
                 ).all()
             )
 
+class LongTermRepository:
+    def __init__(self, sessions: SessionFactory) -> None:
+        self.sessions = sessions
+
+    def upsert_skill(self, skill: SkillDefinition) -> SkillDefinition:
+        with self.sessions.begin() as session:
+            row = session.get(SkillRow, skill.skill_id)
+            if row is None:
+                row = SkillRow(
+                    skill_id=skill.skill_id,
+                    name=skill.name,
+                    description=skill.description,
+                    version=skill.version,
+                    content=skill.content,
+                    checksum=skill.checksum,
+                    tags_json=skill.tags,
+                    compatible_roles_json=skill.compatible_roles,
+                    source=skill.source,
+                    enabled=skill.enabled,
+                    metadata_json=skill.metadata,
+                    created_at=skill.created_at,
+                    updated_at=skill.updated_at,
+                )
+                session.add(row)
+            else:
+                row.name = skill.name
+                row.description = skill.description
+                row.version = skill.version
+                row.content = skill.content
+                row.checksum = skill.checksum
+                row.tags_json = skill.tags
+                row.compatible_roles_json = skill.compatible_roles
+                row.source = skill.source
+                row.enabled = skill.enabled
+                row.metadata_json = skill.metadata
+                row.updated_at = utc_now()
+        return self.get_skill(skill.skill_id)  # type: ignore[return-value]
+
+    def get_skill(self, skill_id: str) -> SkillDefinition | None:
+        with self.sessions() as session:
+            row = session.get(SkillRow, skill_id)
+            return None if row is None else self._skill(row)
+
+    def list_skills(self, *, enabled: bool | None = None) -> list[SkillDefinition]:
+        with self.sessions() as session:
+            statement = select(SkillRow).order_by(SkillRow.name, SkillRow.skill_id)
+            if enabled is not None:
+                statement = statement.where(SkillRow.enabled == enabled)
+            return [self._skill(row) for row in session.scalars(statement).all()]
+
+    def add_skill_load(self, load: SkillLoad) -> SkillLoad:
+        with self.sessions.begin() as session:
+            session.add(
+                SkillLoadRow(
+                    load_id=load.load_id,
+                    skill_id=load.skill_id,
+                    run_id=load.run_id,
+                    flow_id=load.flow_id,
+                    agent_instance_id=load.agent_instance_id,
+                    reason=load.reason,
+                    loaded_at=load.loaded_at,
+                    unloaded_at=load.unloaded_at,
+                )
+            )
+        return load
+
+    def list_skill_loads(
+        self,
+        run_id: str,
+        *,
+        agent_instance_id: str | None = None,
+        active_only: bool = True,
+    ) -> list[SkillLoad]:
+        with self.sessions() as session:
+            statement = select(SkillLoadRow).where(SkillLoadRow.run_id == run_id)
+            if agent_instance_id is not None:
+                statement = statement.where(
+                    sa.or_(
+                        SkillLoadRow.agent_instance_id.is_(None),
+                        SkillLoadRow.agent_instance_id == agent_instance_id,
+                    )
+                )
+            if active_only:
+                statement = statement.where(SkillLoadRow.unloaded_at.is_(None))
+            rows = session.scalars(statement.order_by(SkillLoadRow.loaded_at)).all()
+            return [self._skill_load(row) for row in rows]
+
+    def unload_skill(self, load_id: str) -> SkillLoad:
+        with self.sessions.begin() as session:
+            row = session.get(SkillLoadRow, load_id)
+            if row is None:
+                raise KeyError(load_id)
+            row.unloaded_at = utc_now()
+        return self._skill_load(row)
+
+    def create_todo(self, todo: TodoItem) -> TodoItem:
+        with self.sessions.begin() as session:
+            session.add(self._todo_row(todo))
+        return todo
+
+    def get_todo(self, todo_id: str) -> TodoItem | None:
+        with self.sessions() as session:
+            row = session.get(TodoRow, todo_id)
+            return None if row is None else self._todo(row)
+
+    def update_todo(self, todo: TodoItem) -> TodoItem:
+        with self.sessions.begin() as session:
+            row = session.get(TodoRow, todo.todo_id)
+            if row is None:
+                raise KeyError(todo.todo_id)
+            for name, value in {
+                "title": todo.title,
+                "description": todo.description,
+                "status": todo.status.value,
+                "priority": int(todo.priority),
+                "position": todo.position,
+                "depends_on_json": todo.depends_on,
+                "evidence_ids_json": todo.evidence_ids,
+                "updated_at": todo.updated_at,
+                "completed_at": todo.completed_at,
+            }.items():
+                setattr(row, name, value)
+        return todo
+
+    def list_todos(self, run_id: str) -> list[TodoItem]:
+        with self.sessions() as session:
+            rows = session.scalars(
+                select(TodoRow)
+                .where(TodoRow.run_id == run_id)
+                .order_by(TodoRow.position, TodoRow.created_at)
+            ).all()
+            return [self._todo(row) for row in rows]
+
+    def record_note(self, note: NoteRecord) -> NoteRecord:
+        with self.sessions.begin() as session:
+            session.add(
+                NoteRow(
+                    note_id=note.note_id,
+                    run_id=note.run_id,
+                    flow_id=note.flow_id,
+                    agent_instance_id=note.agent_instance_id,
+                    kind=note.kind.value,
+                    content=note.content,
+                    status=note.status.value,
+                    evidence_ids_json=note.evidence_ids,
+                    tags_json=note.tags,
+                    created_at=note.created_at,
+                    updated_at=note.updated_at,
+                )
+            )
+        return note
+
+    def archive_note(self, note_id: str) -> NoteRecord:
+        with self.sessions.begin() as session:
+            row = session.get(NoteRow, note_id)
+            if row is None:
+                raise KeyError(note_id)
+            row.status = NoteStatus.ARCHIVED.value
+            row.updated_at = utc_now()
+        return self._note(row)
+
+    def list_notes(self, run_id: str, *, active_only: bool = True) -> list[NoteRecord]:
+        with self.sessions() as session:
+            statement = select(NoteRow).where(NoteRow.run_id == run_id)
+            if active_only:
+                statement = statement.where(NoteRow.status == NoteStatus.ACTIVE.value)
+            rows = session.scalars(statement.order_by(NoteRow.created_at)).all()
+            return [self._note(row) for row in rows]
+
+    def save_snapshot(self, snapshot: ContextSnapshot) -> ContextSnapshot:
+        with self.sessions.begin() as session:
+            session.add(
+                ContextSnapshotRow(
+                    snapshot_id=snapshot.snapshot_id,
+                    run_id=snapshot.run_id,
+                    flow_id=snapshot.flow_id,
+                    agent_instance_id=snapshot.agent_instance_id,
+                    source_from_sequence=snapshot.source_from_sequence,
+                    source_to_sequence=snapshot.source_to_sequence,
+                    estimated_tokens_before=snapshot.estimated_tokens_before,
+                    estimated_tokens_after=snapshot.estimated_tokens_after,
+                    narrative_summary=snapshot.narrative_summary,
+                    structured_json=snapshot.structured.model_dump(mode="json"),
+                    created_at=snapshot.created_at,
+                )
+            )
+        return snapshot
+
+    def list_snapshots(self, run_id: str) -> list[ContextSnapshot]:
+        with self.sessions() as session:
+            rows = session.scalars(
+                select(ContextSnapshotRow)
+                .where(ContextSnapshotRow.run_id == run_id)
+                .order_by(ContextSnapshotRow.source_to_sequence, ContextSnapshotRow.created_at)
+            ).all()
+            return [self._snapshot(row) for row in rows]
+
+    @staticmethod
+    def _skill(row: SkillRow) -> SkillDefinition:
+        return SkillDefinition(
+            skill_id=row.skill_id,
+            name=row.name,
+            description=row.description,
+            version=row.version,
+            content=row.content,
+            checksum=row.checksum,
+            tags=row.tags_json,
+            compatible_roles=row.compatible_roles_json,
+            source=row.source,
+            enabled=row.enabled,
+            metadata=row.metadata_json,
+            created_at=as_utc(row.created_at),
+            updated_at=as_utc(row.updated_at),
+        )
+
+    @staticmethod
+    def _skill_load(row: SkillLoadRow) -> SkillLoad:
+        return SkillLoad(
+            load_id=row.load_id,
+            skill_id=row.skill_id,
+            run_id=row.run_id,
+            flow_id=row.flow_id,
+            agent_instance_id=row.agent_instance_id,
+            reason=row.reason,
+            loaded_at=as_utc(row.loaded_at),
+            unloaded_at=as_utc(row.unloaded_at),
+        )
+
+    @staticmethod
+    def _todo_row(todo: TodoItem) -> TodoRow:
+        return TodoRow(
+            todo_id=todo.todo_id,
+            run_id=todo.run_id,
+            flow_id=todo.flow_id,
+            task_id=todo.task_id,
+            agent_instance_id=todo.agent_instance_id,
+            title=todo.title,
+            description=todo.description,
+            status=todo.status.value,
+            priority=int(todo.priority),
+            position=todo.position,
+            depends_on_json=todo.depends_on,
+            evidence_ids_json=todo.evidence_ids,
+            created_at=todo.created_at,
+            updated_at=todo.updated_at,
+            completed_at=todo.completed_at,
+        )
+
+    @staticmethod
+    def _todo(row: TodoRow) -> TodoItem:
+        return TodoItem(
+            todo_id=row.todo_id,
+            run_id=row.run_id,
+            flow_id=row.flow_id,
+            task_id=row.task_id,
+            agent_instance_id=row.agent_instance_id,
+            title=row.title,
+            description=row.description,
+            status=row.status,
+            priority=row.priority,
+            position=row.position,
+            depends_on=row.depends_on_json,
+            evidence_ids=row.evidence_ids_json,
+            created_at=as_utc(row.created_at),
+            updated_at=as_utc(row.updated_at),
+            completed_at=as_utc(row.completed_at),
+        )
+
+    @staticmethod
+    def _note(row: NoteRow) -> NoteRecord:
+        return NoteRecord(
+            note_id=row.note_id,
+            run_id=row.run_id,
+            flow_id=row.flow_id,
+            agent_instance_id=row.agent_instance_id,
+            kind=row.kind,
+            content=row.content,
+            status=row.status,
+            evidence_ids=row.evidence_ids_json,
+            tags=row.tags_json,
+            created_at=as_utc(row.created_at),
+            updated_at=as_utc(row.updated_at),
+        )
+
+    @staticmethod
+    def _snapshot(row: ContextSnapshotRow) -> ContextSnapshot:
+        return ContextSnapshot(
+            snapshot_id=row.snapshot_id,
+            run_id=row.run_id,
+            flow_id=row.flow_id,
+            agent_instance_id=row.agent_instance_id,
+            source_from_sequence=row.source_from_sequence,
+            source_to_sequence=row.source_to_sequence,
+            estimated_tokens_before=row.estimated_tokens_before,
+            estimated_tokens_after=row.estimated_tokens_after,
+            narrative_summary=row.narrative_summary,
+            structured=StructuredContext.model_validate(row.structured_json),
+            created_at=as_utc(row.created_at),
+        )
+
 
 @dataclass(frozen=True)
 class NativeRepositories:
@@ -1236,6 +1554,7 @@ class NativeRepositories:
     results: ResultRepository
     approvals: ApprovalRepository
     llm: LLMRepository
+    long_term: LongTermRepository
 
 
 def create_native_repositories(database_url: str, *, echo: bool = False) -> NativeRepositories:
@@ -1262,4 +1581,5 @@ def create_native_repositories(database_url: str, *, echo: bool = False) -> Nati
         results=ResultRepository(sessions),
         approvals=ApprovalRepository(sessions),
         llm=LLMRepository(sessions),
+        long_term=LongTermRepository(sessions),
     )

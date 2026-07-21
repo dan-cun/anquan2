@@ -4,9 +4,10 @@ from pathlib import Path
 
 from alembic.config import Config
 from sqlalchemy import inspect
+from sqlalchemy.orm import Session
 
 from alembic import command
-from ledger.runtime_store import Base, RuntimeLedgerStore
+from ledger.runtime_store import Base, RuntimeEventRow, RuntimeLedgerStore
 
 
 def test_alembic_creates_runtime_and_projection_schema(tmp_path, monkeypatch) -> None:
@@ -32,9 +33,39 @@ def test_alembic_creates_runtime_and_projection_schema(tmp_path, monkeypatch) ->
         "projection_llm_usage",
         "projection_offsets",
     }.issubset(tables)
+    runtime_columns = {
+        item["name"] for item in inspect(ledger.engine).get_columns("runtime_ledger_events")
+    }
+    assert {
+        "schema_version",
+        "flow_id",
+        "correlation_id",
+        "causation_id",
+        "decision_id",
+        "agent_instance_id",
+        "task_id",
+        "tool_invocation_id",
+        "visibility",
+    } <= runtime_columns
 
-    event = ledger.append("migration-run", "run.queued", {"objective": "verify schema"})
+    event = ledger.append(
+        "migration-run",
+        "run.queued",
+        {"objective": "verify schema", "flow_id": "flow-1"},
+        context={"correlation_id": "operation-1"},
+    )
     assert event.sequence == 1
+    assert event.context.flow_id == "flow-1"
+    assert event.context.correlation_id == "operation-1"
+    assert ledger.verify("migration-run") is True
+
+    with Session(ledger.engine) as session:
+        row = session.get(RuntimeEventRow, event.event_id)
+        assert row is not None
+        row.correlation_id = "tampered-operation"
+        session.commit()
+
+    assert ledger.verify("migration-run") is False
 
 
 def test_postgres_store_never_calls_create_all(monkeypatch) -> None:

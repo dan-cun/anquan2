@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -36,7 +35,7 @@ from app.schemas.prompts import (
     PromptTemplateRecord,
     PromptVersionRecord,
 )
-from app.schemas.runtime import LedgerEvent
+from app.schemas.runtime import RunStatus, TaskRequest
 from app.schemas.tools import CapabilityKind, ToolExecutionStatus
 
 if TYPE_CHECKING:
@@ -45,6 +44,14 @@ if TYPE_CHECKING:
 
 def _optional(value: Any, default: Any = None) -> Any:
     return default if value is strawberry.UNSET else value
+
+
+def _strings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
 
 
 def _task(row: TaskRow) -> types.Task:
@@ -123,12 +130,20 @@ class NativeGraphQLAdapter:
         input: types.SubmitFlowInput,
     ) -> types.Flow:
         self.repositories.flows.update_status(flow_id, FlowStatus.running)
-        _, result = await self.services.collaboration.submit(
+        metadata = dict(_optional(input.metadata, {}) or {})
+        _, state = await self.services.execution.run_inline(
+            TaskRequest(
+                objective=input.content,
+                target_scope=_strings(metadata.get("target_scope")),
+                constraints=_strings(metadata.get("constraints")),
+                expected_outputs=(
+                    _strings(metadata.get("expected_outputs")) or ["security_report"]
+                ),
+                autonomy_policy=str(metadata.get("autonomy_policy", "graded")),
+            ),
             flow_id=flow_id,
-            objective=input.content,
-            metadata=dict(_optional(input.metadata, {}) or {}),
         )
-        status = FlowStatus.finished if result.status.value == "completed" else FlowStatus.failed
+        status = FlowStatus.finished if state.status == RunStatus.COMPLETED else FlowStatus.failed
         return converters.flow(self.repositories.flows.update_status(flow_id, status))
 
     async def stop_flow(self, flow_id: str, reason: str | None) -> types.Flow:
@@ -181,8 +196,13 @@ class NativeGraphQLAdapter:
         if assistant is None or str(assistant.flow_id) != flow_id:
             raise GraphQLError("assistant not found")
         if use_agents:
-            await self.services.collaboration.submit(flow_id=flow_id, objective=input)
-        assistant.status = "completed"
+            _, state = await self.services.execution.run_inline(
+                TaskRequest(objective=input),
+                flow_id=flow_id,
+            )
+            assistant.status = state.status.value
+        else:
+            assistant.status = "completed"
         assistant.updated_at = datetime.now(UTC)
         return assistant
 
@@ -265,16 +285,69 @@ class NativeGraphQLAdapter:
             expected_outputs=list(_optional(input.expected_outputs, []) or []),
             metadata=dict(_optional(input.metadata, {}) or {}),
         )
-        await self.services.agent_dispatcher.delegate_from(
+        delegation = await self.services.agent_dispatcher.start_delegation(
             str(input.from_agent_instance_id),
             input.to_role,
             task,
         )
-        values = self.repositories.agents.list_delegations(str(input.run_id))
-        match = next((item for item in reversed(values) if item.task.task_id == task.task_id), None)
-        if match is None:
-            raise GraphQLError("delegation was not persisted")
-        return converters.agent_delegation(match)
+        return converters.agent_delegation(delegation)
+
+    async def create(self, input: types.CreateAgentInput) -> types.AgentInstance:
+        try:
+            instance = await self.services.collaboration.start(
+                flow_id=str(input.flow_id),
+                run_id=_optional(input.run_id),
+                role=input.role,
+                objective=input.objective,
+                metadata=dict(_optional(input.metadata, {}) or {}),
+            )
+        except (KeyError, ValueError) as error:
+            raise GraphQLError(str(error)) from error
+        return converters.agent_instance(instance)
+
+    async def send_message(
+        self,
+        input: types.SendAgentMessageInput,
+    ) -> types.AgentMessage:
+        try:
+            message = await self.services.collaboration.send_message(
+                from_agent_instance_id=str(input.from_agent_instance_id),
+                to_agent_instance_id=str(input.to_agent_instance_id),
+                summary=input.summary,
+                kind=input.kind,
+                payload_ref=_optional(input.payload_ref),
+                metadata=dict(_optional(input.metadata, {}) or {}),
+            )
+        except (KeyError, ValueError) as error:
+            raise GraphQLError(str(error)) from error
+        return converters.agent_message(message)
+
+    async def wait_agent(
+        self,
+        agent_instance_id: str,
+        timeout_seconds: int,
+    ) -> types.AgentInstance:
+        if not 0 <= timeout_seconds <= 600:
+            raise GraphQLError("timeoutSeconds must be between 0 and 600")
+        try:
+            instance = await self.services.collaboration.wait_agent(
+                agent_instance_id,
+                timeout_seconds=float(timeout_seconds),
+            )
+        except KeyError as error:
+            raise GraphQLError("agent instance not found") from error
+        return converters.agent_instance(instance)
+
+    async def stop_agent(self, agent_instance_id: str, reason: str) -> types.AgentInstance:
+        normalized_reason = reason.strip() or "Operator requested stop"
+        try:
+            instance = await self.services.collaboration.stop_agent(
+                agent_instance_id,
+                reason=normalized_reason,
+            )
+        except KeyError as error:
+            raise GraphQLError("agent instance not found") from error
+        return converters.agent_instance(instance)
 
     async def list_tools(self) -> list[types.UnifiedTool]:
         return [converters.unified_tool(item) for item in self.services.tool_gateway.definitions()]
@@ -562,6 +635,131 @@ class NativeGraphQLAdapter:
             for row in self.repositories.approvals.list_for_run(run_id)
         ]
 
+    async def list_skills(self, enabled: bool | None) -> list[types.Skill]:
+        return [
+            converters.skill(item)
+            for item in self.services.long_term.list_skills(enabled=enabled)
+        ]
+
+    async def list_skill_loads(
+        self,
+        run_id: str,
+        agent_instance_id: str | None,
+    ) -> list[types.SkillLoad]:
+        return [
+            converters.skill_load(item)
+            for item in self.services.repositories.long_term.list_skill_loads(
+                run_id,
+                agent_instance_id=agent_instance_id,
+                active_only=False,
+            )
+        ]
+
+    async def list_todos(self, run_id: str) -> list[types.Todo]:
+        return [converters.todo(item) for item in self.services.long_term.list_todos(run_id)]
+
+    async def list_notes(self, run_id: str, active_only: bool) -> list[types.Note]:
+        return [
+            converters.note(item)
+            for item in self.services.long_term.list_notes(run_id, active_only=active_only)
+        ]
+
+    async def list_context_snapshots(self, run_id: str) -> list[types.ContextSnapshot]:
+        return [
+            converters.context_snapshot(item)
+            for item in self.services.repositories.long_term.list_snapshots(run_id)
+        ]
+
+    async def register_skill(self, input: types.RegisterSkillInput) -> types.Skill:
+        value = await self.services.long_term.register_skill(
+            skill_id=str(input.skill_id),
+            name=input.name,
+            content=input.content,
+            description=input.description,
+            version=input.version,
+            tags=list(input.tags or []),
+            compatible_roles=list(input.compatible_roles or []),
+            source=input.source,
+            enabled=input.enabled,
+            metadata=dict(input.metadata or {}),
+        )
+        return converters.skill(value)
+
+    async def load_skill(self, input: types.LoadSkillInput) -> types.SkillLoad:
+        value = await self.services.long_term.load_skill(
+            skill_id=str(input.skill_id),
+            run_id=str(input.run_id),
+            flow_id=str(input.flow_id),
+            agent_instance_id=(
+                None if input.agent_instance_id is None else str(input.agent_instance_id)
+            ),
+            reason=input.reason,
+        )
+        return converters.skill_load(value)
+
+    async def unload_skill(self, load_id: str) -> types.SkillLoad:
+        return converters.skill_load(await self.services.long_term.unload_skill(load_id))
+
+    async def create_todo(self, input: types.CreateTodoInput) -> types.Todo:
+        value = await self.services.long_term.create_todo(
+            run_id=str(input.run_id),
+            flow_id=str(input.flow_id),
+            title=input.title,
+            description=input.description,
+            priority=input.priority,
+            position=input.position,
+            task_id=None if input.task_id is None else str(input.task_id),
+            agent_instance_id=(
+                None if input.agent_instance_id is None else str(input.agent_instance_id)
+            ),
+            depends_on=[str(item) for item in input.depends_on or []],
+        )
+        return converters.todo(value)
+
+    async def update_todo(self, todo_id: str, input: types.UpdateTodoInput) -> types.Todo:
+        value = await self.services.long_term.update_todo(
+            todo_id,
+            status=input.status,
+            title=input.title,
+            description=input.description,
+            evidence_ids=(
+                None
+                if input.evidence_ids is None
+                else [str(item) for item in input.evidence_ids]
+            ),
+        )
+        return converters.todo(value)
+
+    async def record_note(self, input: types.RecordNoteInput) -> types.Note:
+        value = await self.services.long_term.record_note(
+            run_id=str(input.run_id),
+            flow_id=str(input.flow_id),
+            kind=input.kind,
+            content=input.content,
+            agent_instance_id=(
+                None if input.agent_instance_id is None else str(input.agent_instance_id)
+            ),
+            evidence_ids=[str(item) for item in input.evidence_ids or []],
+            tags=list(input.tags or []),
+        )
+        return converters.note(value)
+
+    async def archive_note(self, note_id: str) -> types.Note:
+        return converters.note(await self.services.long_term.archive_note(note_id))
+
+    async def compress_context(
+        self,
+        run_id: str,
+        flow_id: str,
+        agent_instance_id: str | None,
+    ) -> types.ContextSnapshot:
+        value = await self.services.long_term.compress_context(
+            run_id=run_id,
+            flow_id=flow_id,
+            agent_instance_id=agent_instance_id,
+        )
+        return converters.context_snapshot(value)
+
     async def resolve_approval(
         self,
         run_id: str,
@@ -715,37 +913,29 @@ class NativeGraphQLEventAdapter:
         run_id = filters.get("run_id")
         after_sequence = int(filters.get("after_sequence") or 0)
         if topic == "runtime.event" and run_id:
-            for item in self.services.runtime_ledger.events(run_id, after_sequence, 10_000):
+            async for item in self.services.runtime_event_stream.subscribe(
+                run_id,
+                after_sequence=after_sequence,
+            ):
                 yield converters.runtime_event(item)
-            async with self.services.runtime_events.subscribe(run_id) as queue:
-                while True:
-                    yield converters.runtime_event(LedgerEvent.model_validate(await queue.get()))
         else:
             async for value in self._typed_events(topic, filters):
                 yield value
 
     async def _typed_events(self, topic: str, filters: dict[str, Any]) -> AsyncIterator[Any]:
         flow_id = filters.get("flow_id")
-        cursors: dict[str, int] = {}
-        while True:
-            run_ids = self.services.runtime_ledger.run_ids()
-            for run_id in run_ids:
-                for event in self.services.runtime_ledger.events(
-                    run_id, cursors.get(run_id, 0), 1000
-                ):
-                    cursors[run_id] = event.sequence
-                    if event.event_type != topic:
-                        continue
-                    payload_flow = event.payload.get("flow_id")
-                    instance = event.payload.get("instance")
-                    if payload_flow is None and isinstance(instance, dict):
-                        payload_flow = instance.get("flow_id")
-                    if flow_id is not None and payload_flow != flow_id:
-                        continue
-                    value = self._typed_value(topic, event.payload)
-                    if value is not None:
-                        yield value
-            await asyncio.sleep(0.2)
+        async for event in self.services.runtime_event_stream.subscribe_all():
+            if event.event_type != topic:
+                continue
+            payload_flow = event.context.flow_id or event.payload.get("flow_id")
+            instance = event.payload.get("instance")
+            if payload_flow is None and isinstance(instance, dict):
+                payload_flow = instance.get("flow_id")
+            if flow_id is not None and payload_flow != flow_id:
+                continue
+            value = self._typed_value(topic, event.payload)
+            if value is not None:
+                yield value
 
     @staticmethod
     def _typed_value(topic: str, payload: dict[str, Any]) -> Any:
@@ -774,6 +964,7 @@ def build_graphql_backend(services: AppServices) -> GraphQLBackend:
         tools=adapter,
         mcp=adapter,
         prompts=adapter,
+        long_term=adapter,
         audit=adapter,
         analytics=adapter,
         events=services.graphql_events,

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from app.schemas.agents import AgentDescriptor, AgentRole
 from llm.base import LLMProvider
 
+from .loop_guard import LoopGuardConfig
 from .native import ModelNativeAgent, NativeAgent, PromptResolver
 from .subgraph import NativeAgentSubgraph
 
@@ -167,6 +168,7 @@ def build_native_agent_registry(
     prompts: PromptResolver,
     max_iterations: int = 24,
     max_reflections: int = 3,
+    loop_guard_config: LoopGuardConfig | None = None,
 ) -> NativeAgentRegistry:
     registry = NativeAgentRegistry()
 
@@ -177,6 +179,7 @@ def build_native_agent_registry(
             prompts=prompts,
             max_iterations=max_iterations,
             max_reflections=max_reflections,
+            loop_guard_config=loop_guard_config,
         )
 
     for descriptor in ROLE_DESCRIPTORS:

@@ -11,6 +11,7 @@ from agents.dispatcher import AgentDispatcher
 from agents.native import StaticPromptResolver
 from agents.registry import ROLE_DESCRIPTORS, build_native_agent_registry
 from app.schemas.agents import AgentMessageKind, AgentRole, AgentStatus, AgentTask
+from app.schemas.runtime import EventContext
 from app.schemas.tools import (
     ToolExecutionStatus,
     UnifiedToolInvocation,
@@ -64,7 +65,13 @@ class EventRecorder:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any], str]] = []
 
-    async def publish(self, event_type: str, payload: dict[str, Any], actor: str) -> None:
+    async def publish(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        actor: str,
+        context: EventContext | None = None,
+    ) -> None:
         self.events.append((event_type, payload, actor))
 
 
@@ -116,6 +123,7 @@ async def test_root_agent_lifecycle_uses_an_independent_chain() -> None:
     assert [item[0] for item in events.events] == [
         "agent.created",
         "agent.started",
+        "decision.recorded",
         "agent.completed",
     ]
     instances = dispatcher.instances("run-root")

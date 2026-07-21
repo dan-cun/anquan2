@@ -84,6 +84,64 @@ enum PromptVersionStatus {
   ARCHIVED
 }
 
+enum DecisionKind {
+  ROUTE
+  PLAN
+  DELEGATE
+  TOOL
+  WAIT
+  STOP
+  VERIFY
+  RETRY
+  COMPLETE
+  FALLBACK
+  OTHER
+}
+
+enum EventCategory {
+  RUN
+  FLOW
+  TASK
+  INPUT
+  CONTEXT
+  PLAN
+  DECISION
+  STEP
+  POLICY
+  APPROVAL
+  AGENT
+  TOOL
+  MCP
+  OBSERVATION
+  ANALYSIS
+  VERIFICATION
+  REPORT
+  EVIDENCE
+  FINDING
+  MEMORY
+  SKILL
+  TODO
+  NOTE
+  LOOP
+  CIRCUIT
+  LLM
+  MODEL
+  PROMPT
+  SYSTEM
+}
+
+enum EventVisibility {
+  PUBLIC
+  OPERATOR
+  AUDIT
+}
+
+enum VerificationVerdict {
+  CONFIRMED
+  REJECTED
+  INCONCLUSIVE
+}
+
 type Flow {
   id: ID!
   title: String!
@@ -329,16 +387,155 @@ type Approval {
   resolvedAt: DateTime
 }
 
+enum TodoStatus {
+  PENDING
+  IN_PROGRESS
+  BLOCKED
+  COMPLETED
+  CANCELLED
+}
+
+enum TodoPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum NoteKind {
+  FACT
+  HYPOTHESIS
+  CONSTRAINT
+  DECISION
+  OBSERVATION
+  ERROR
+}
+
+enum NoteStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+type Skill {
+  skillId: ID!
+  name: String!
+  description: String!
+  version: String!
+  content: String!
+  checksum: String!
+  tags: [String!]!
+  compatibleRoles: [String!]!
+  source: String!
+  enabled: Boolean!
+  metadata: JSON!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type SkillLoad {
+  loadId: ID!
+  skillId: ID!
+  runId: ID!
+  flowId: ID!
+  reason: String!
+  loadedAt: DateTime!
+  agentInstanceId: ID
+  unloadedAt: DateTime
+}
+
+type Todo {
+  todoId: ID!
+  runId: ID!
+  flowId: ID!
+  title: String!
+  description: String!
+  status: TodoStatus!
+  priority: TodoPriority!
+  position: Int!
+  dependsOn: [ID!]!
+  evidenceIds: [ID!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  taskId: ID
+  agentInstanceId: ID
+  completedAt: DateTime
+}
+
+type Note {
+  noteId: ID!
+  runId: ID!
+  flowId: ID!
+  kind: NoteKind!
+  content: String!
+  status: NoteStatus!
+  evidenceIds: [ID!]!
+  tags: [String!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  agentInstanceId: ID
+}
+
+type ContextSnapshot {
+  snapshotId: ID!
+  runId: ID!
+  flowId: ID!
+  sourceFromSequence: Int!
+  sourceToSequence: Int!
+  estimatedTokensBefore: Int!
+  estimatedTokensAfter: Int!
+  narrativeSummary: String!
+  structured: JSON!
+  createdAt: DateTime!
+  agentInstanceId: ID
+}
+
+type DecisionAlternative {
+  option: String!
+  rejectionReason: String!
+  evidenceIds: [ID!]!
+}
+
+type DecisionRecord {
+  decisionId: ID!
+  kind: DecisionKind!
+  goal: String!
+  decision: String!
+  rationaleSummary: String!
+  evidenceIds: [ID!]!
+  alternatives: [DecisionAlternative!]!
+  confidence: Float!
+  createdAt: DateTime!
+  expectedOutcome: String
+  riskSummary: String
+  actualOutcome: String
+  nextAction: String
+  policyIds: [String!]!
+  modelId: String
+  promptVersion: String
+}
+
 type RuntimeEvent {
   eventId: ID!
   runId: ID!
   sequence: Int!
   eventType: String!
+  schemaVersion: String!
+  category: EventCategory!
   actor: String!
   payload: JSON!
   timestamp: DateTime!
   prevHash: String!
   hash: String!
+  visibility: EventVisibility!
+  flowId: ID
+  correlationId: ID
+  causationId: ID
+  decisionId: ID
+  agentInstanceId: ID
+  taskId: ID
+  toolInvocationId: ID
+  decision: DecisionRecord
+  verificationVerdict: VerificationVerdict
 }
 
 type Report {
@@ -465,6 +662,73 @@ input DelegateAgentInput {
   metadata: JSON
 }
 
+input RegisterSkillInput {
+  skillId: ID!
+  name: String!
+  content: String!
+  description: String! = ""
+  version: String! = "1.0"
+  tags: [String!] = null
+  compatibleRoles: [String!] = null
+  source: String! = "operator"
+  enabled: Boolean! = true
+  metadata: JSON = null
+}
+
+input LoadSkillInput {
+  skillId: ID!
+  runId: ID!
+  flowId: ID!
+  agentInstanceId: ID = null
+  reason: String! = ""
+}
+
+input CreateTodoInput {
+  runId: ID!
+  flowId: ID!
+  title: String!
+  description: String! = ""
+  priority: TodoPriority! = NORMAL
+  position: Int! = 0
+  taskId: ID = null
+  agentInstanceId: ID = null
+  dependsOn: [ID!] = null
+}
+
+input UpdateTodoInput {
+  status: TodoStatus = null
+  title: String = null
+  description: String = null
+  evidenceIds: [ID!] = null
+}
+
+input RecordNoteInput {
+  runId: ID!
+  flowId: ID!
+  kind: NoteKind!
+  content: String!
+  agentInstanceId: ID = null
+  evidenceIds: [ID!] = null
+  tags: [String!] = null
+}
+
+input CreateAgentInput {
+  flowId: ID!
+  role: AgentRole!
+  objective: String!
+  runId: ID
+  metadata: JSON
+}
+
+input SendAgentMessageInput {
+  fromAgentInstanceId: ID!
+  toAgentInstanceId: ID!
+  summary: String!
+  kind: AgentMessageKind! = STATUS
+  payloadRef: String
+  metadata: JSON
+}
+
 input RevisePlanInput {
   runId: ID!
   taskId: ID!
@@ -489,6 +753,11 @@ type Query {
   mcpCapabilities(serverId: ID, kind: CapabilityKind): [MCPCapability!]!
   prompts: [PromptTemplate!]!
   prompt(promptKey: ID!): PromptTemplate!
+  skills(enabled: Boolean): [Skill!]!
+  skillLoads(runId: ID!, agentInstanceId: ID): [SkillLoad!]!
+  todos(runId: ID!): [Todo!]!
+  notes(runId: ID!, activeOnly: Boolean = true): [Note!]!
+  contextSnapshots(runId: ID!): [ContextSnapshot!]!
   approvals(runId: ID!): [Approval!]!
   runtimeEvents(runId: ID!, afterSequence: Int = 0): [RuntimeEvent!]!
   report(runId: ID!): Report
@@ -517,6 +786,10 @@ type Mutation {
   retrySubtask(subtaskId: ID!): Subtask!
   revisePlan(input: RevisePlanInput!): Task!
   delegateAgent(input: DelegateAgentInput!): AgentDelegation!
+  createAgent(input: CreateAgentInput!): AgentInstance!
+  sendAgentMessage(input: SendAgentMessageInput!): AgentMessage!
+  waitAgent(agentInstanceId: ID!, timeoutSeconds: Int! = 30): AgentInstance!
+  stopAgent(agentInstanceId: ID!, reason: String! = "Operator requested stop"): AgentInstance!
   registerMCPServer(input: RegisterMCPServerInput!): MCPServer!
   updateMCPServer(serverId: ID!, input: UpdateMCPServerInput!): MCPServer!
   removeMCPServer(serverId: ID!): Boolean!
@@ -524,6 +797,14 @@ type Mutation {
   createPromptVersion(input: CreatePromptVersionInput!): PromptVersion!
   enablePromptVersion(promptKey: ID!, versionId: ID!): PromptTemplate!
   importPrompts(workbookRef: String!): [PromptTemplate!]!
+  registerSkill(input: RegisterSkillInput!): Skill!
+  loadSkill(input: LoadSkillInput!): SkillLoad!
+  unloadSkill(loadId: ID!): SkillLoad!
+  createTodo(input: CreateTodoInput!): Todo!
+  updateTodo(todoId: ID!, input: UpdateTodoInput!): Todo!
+  recordNote(input: RecordNoteInput!): Note!
+  archiveNote(noteId: ID!): Note!
+  compressContext(runId: ID!, flowId: ID!, agentInstanceId: ID): ContextSnapshot!
 }
 
 type Subscription {

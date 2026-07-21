@@ -12,7 +12,7 @@ import {
 import { isFeatureRoute } from '../src/app/featureRoutes.js'
 
 test('routes all operational pages through the feature application', () => {
-  for (const route of ['/workbench', '/audit/run-1', '/prompts', '/mcp', '/models']) {
+  for (const route of ['/workbench', '/audit/run-1', '/prompts', '/mcp', '/models', '/state']) {
     assert.equal(isFeatureRoute(route), true)
   }
   assert.equal(isFeatureRoute('/'), false)

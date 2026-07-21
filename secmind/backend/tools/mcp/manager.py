@@ -4,14 +4,12 @@ import asyncio
 import hashlib
 import inspect
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from mcp import ClientSession
 from mcp import types as mcp_types
@@ -31,12 +29,11 @@ from app.schemas.tools import (
     UnifiedToolInvocation,
     UnifiedToolResult,
 )
-from ledger.runtime_store import redact
 from tools.mcp.transports import build_transport
+from tools.safety import redact_tool_value, safe_error_message
 
 EventPublisher = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 logger = logging.getLogger(__name__)
-URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 
 
 class MCPManagerError(RuntimeError):
@@ -206,7 +203,7 @@ class _ServerWorker:
             self.snapshot = self.snapshot.model_copy(
                 update={
                     "status": MCPServerStatus.FAILED,
-                    "error_message": f"{type(exc).__name__}: {exc}",
+                    "error_message": f"{type(exc).__name__}: {safe_error_message(exc)}",
                     "capabilities": [],
                 },
                 deep=True,
@@ -222,7 +219,7 @@ class _ServerWorker:
                 {
                     "server_id": self.config.server_id,
                     "error_type": type(exc).__name__,
-                    "error_message": str(exc),
+                    "error_message": safe_error_message(exc),
                 },
             )
             self._reject_queued(exc)
@@ -297,7 +294,7 @@ class _ServerWorker:
                 self.snapshot = self.snapshot.model_copy(
                     update={
                         "status": MCPServerStatus.DEGRADED,
-                        "error_message": f"{type(exc).__name__}: {exc}",
+                        "error_message": f"{type(exc).__name__}: {safe_error_message(exc)}",
                     },
                     deep=True,
                 )
@@ -467,7 +464,7 @@ class _ServerWorker:
                 "server_id": self.config.server_id,
                 "tool_id": invocation.tool_id,
                 "tool_name": tool_name,
-                "arguments": redact(invocation.arguments),
+                "arguments": redact_tool_value(invocation.arguments),
             },
         )
         try:
@@ -513,7 +510,7 @@ class _ServerWorker:
                 tool_id=invocation.tool_id,
                 status=ToolExecutionStatus.FAILED,
                 error_code="mcp_call_error",
-                error_message=f"{type(exc).__name__}: {exc}",
+                error_message=f"{type(exc).__name__}: {safe_error_message(exc)}",
                 duration_ms=_duration_ms(started),
             )
             await self._emit("mcp.call_failed", _result_event_payload(invocation, result))
@@ -563,7 +560,7 @@ class _ServerWorker:
         if self.publisher is None:
             return
         try:
-            safe_payload = _redact_url_queries(redact(payload))
+            safe_payload = redact_tool_value(payload)
             result = self.publisher(event_type, safe_payload)
             if inspect.isawaitable(result):
                 await result
@@ -774,9 +771,9 @@ def _normalize_tool_result(
             artifact_refs.append(str(item.uri))
         elif item.type == "resource":
             artifact_refs.append(str(item.resource.uri))
-    text = "\n".join(text_parts).strip()
+    text = str(redact_tool_value("\n".join(text_parts).strip()))
     structured = response.structuredContent or {}
-    data = {"content": content, "structured_content": structured}
+    data = redact_tool_value({"content": content, "structured_content": structured})
     is_error = bool(response.isError)
     return UnifiedToolResult(
         invocation_id=invocation.invocation_id,
@@ -784,7 +781,7 @@ def _normalize_tool_result(
         status=(ToolExecutionStatus.FAILED if is_error else ToolExecutionStatus.COMPLETED),
         text=text,
         data=data,
-        artifact_refs=artifact_refs,
+        artifact_refs=redact_tool_value(artifact_refs),
         error_code="mcp_tool_error" if is_error else None,
         error_message=text or "MCP tool returned an error" if is_error else None,
         duration_ms=_duration_ms(started),
@@ -809,26 +806,3 @@ def _result_event_payload(
 
 def _duration_ms(started: float) -> int:
     return max(0, round((time.perf_counter() - started) * 1000))
-
-
-def _redact_url_queries(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _redact_url_queries(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_url_queries(item) for item in value]
-    if not isinstance(value, str):
-        return value
-
-    def replace(match: re.Match[str]) -> str:
-        raw_url = match.group(0)
-        try:
-            parts = urlsplit(raw_url)
-            if not parts.query:
-                return raw_url
-            return urlunsplit(
-                (parts.scheme, parts.netloc, parts.path, "[REDACTED]", parts.fragment)
-            )
-        except ValueError:
-            return "[REDACTED_URL]"
-
-    return URL_PATTERN.sub(replace, value)

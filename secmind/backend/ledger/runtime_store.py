@@ -14,7 +14,13 @@ from uuid import uuid4
 from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from app.schemas.runtime import AgentState, LedgerEvent, RunStatus
+from app.schemas.runtime import (
+    EVENT_CONTRACT_VERSION,
+    AgentState,
+    EventContext,
+    LedgerEvent,
+    RunStatus,
+)
 
 ZERO_HASH = "0" * 64
 SECRET_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token"}
@@ -35,8 +41,17 @@ class RuntimeEventRow(Base):
     run_id: Mapped[str] = mapped_column(String(36), index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(100), index=True)
+    schema_version: Mapped[str] = mapped_column(String(20), default=EVENT_CONTRACT_VERSION)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     actor: Mapped[str] = mapped_column(String(100))
+    flow_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    causation_id: Mapped[str | None] = mapped_column(String(36))
+    decision_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    agent_instance_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(36))
+    tool_invocation_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    visibility: Mapped[str] = mapped_column(String(20), default="public")
     payload_json: Mapped[str] = mapped_column(Text)
     prev_hash: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
@@ -117,8 +132,11 @@ class RuntimeLedgerStore:
         event_type: str,
         payload: dict[str, Any],
         actor: str = "system",
+        *,
+        context: EventContext | dict[str, Any] | None = None,
     ) -> LedgerEvent:
         safe_payload = redact(payload)
+        event_context = self._event_context(safe_payload, context)
         with self._lock_for(run_id), Session(self.engine) as session:
             previous = session.scalars(
                 select(RuntimeEventRow)
@@ -130,24 +148,35 @@ class RuntimeLedgerStore:
             prev_hash = ZERO_HASH if previous is None else previous.hash
             timestamp = datetime.now(UTC)
             event_id = str(uuid4())
-            digest_input = {
-                "event_id": event_id,
-                "run_id": run_id,
-                "sequence": sequence,
-                "event_type": event_type,
-                "timestamp": timestamp.isoformat(),
-                "actor": actor,
-                "payload": safe_payload,
-                "prev_hash": prev_hash,
-            }
-            digest = hashlib.sha256(canonical_json(digest_input).encode()).hexdigest()
-            row = RuntimeEventRow(
+            digest_input = self._digest_input(
+                schema_version=EVENT_CONTRACT_VERSION,
                 event_id=event_id,
                 run_id=run_id,
                 sequence=sequence,
                 event_type=event_type,
                 timestamp=timestamp,
                 actor=actor,
+                payload=safe_payload,
+                prev_hash=prev_hash,
+                context=event_context,
+            )
+            digest = hashlib.sha256(canonical_json(digest_input).encode()).hexdigest()
+            row = RuntimeEventRow(
+                event_id=event_id,
+                run_id=run_id,
+                sequence=sequence,
+                event_type=event_type,
+                schema_version=EVENT_CONTRACT_VERSION,
+                timestamp=timestamp,
+                actor=actor,
+                flow_id=event_context.flow_id,
+                correlation_id=event_context.correlation_id,
+                causation_id=event_context.causation_id,
+                decision_id=event_context.decision_id,
+                agent_instance_id=event_context.agent_instance_id,
+                task_id=event_context.task_id,
+                tool_invocation_id=event_context.tool_invocation_id,
+                visibility=event_context.visibility.value,
                 payload_json=canonical_json(safe_payload),
                 prev_hash=prev_hash,
                 hash=digest,
@@ -209,16 +238,18 @@ class RuntimeLedgerStore:
                 return False
             if event.prev_hash != previous:
                 return False
-            digest_input = {
-                "event_id": event.event_id,
-                "run_id": event.run_id,
-                "sequence": event.sequence,
-                "event_type": event.event_type,
-                "timestamp": event.timestamp.isoformat(),
-                "actor": event.actor,
-                "payload": event.payload,
-                "prev_hash": event.prev_hash,
-            }
+            digest_input = self._digest_input(
+                schema_version=event.schema_version,
+                event_id=event.event_id,
+                run_id=event.run_id,
+                sequence=event.sequence,
+                event_type=event.event_type,
+                timestamp=event.timestamp,
+                actor=event.actor,
+                payload=event.payload,
+                prev_hash=event.prev_hash,
+                context=event.context,
+            )
             expected = hashlib.sha256(canonical_json(digest_input).encode()).hexdigest()
             if expected != event.hash:
                 return False
@@ -285,6 +316,7 @@ class RuntimeLedgerStore:
         with Session(self.engine) as session:
             statement = select(
                 RuntimeEventRow.run_id,
+                RuntimeEventRow.flow_id,
                 RuntimeEventRow.payload_json,
                 RuntimeEventRow.timestamp,
             ).where(RuntimeEventRow.event_type == "llm.response")
@@ -292,7 +324,7 @@ class RuntimeLedgerStore:
                 statement = statement.where(RuntimeEventRow.timestamp >= cutoff)
             rows = session.execute(statement.order_by(RuntimeEventRow.timestamp)).all()
 
-        for run_id, payload_json, timestamp in rows:
+        for run_id, flow_id, payload_json, timestamp in rows:
             timestamp = timestamp.replace(tzinfo=timestamp.tzinfo or UTC)
             payload = json.loads(payload_json)
             raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
@@ -320,10 +352,11 @@ class RuntimeLedgerStore:
                     "last_request_at": timestamp,
                 },
             )
+            resolved_flow_id = flow_id or run_id
             conversation = by_conversation.setdefault(
-                run_id,
+                resolved_flow_id,
                 {
-                    "flow_id": run_id,
+                    "flow_id": resolved_flow_id,
                     "title": None,
                     "models": set(),
                     "request_count": 0,
@@ -374,16 +407,73 @@ class RuntimeLedgerStore:
     @staticmethod
     def _to_event(row: RuntimeEventRow) -> LedgerEvent:
         return LedgerEvent(
+            schema_version=row.schema_version,
             event_id=row.event_id,
             run_id=row.run_id,
             sequence=row.sequence,
             event_type=row.event_type,
             timestamp=row.timestamp.replace(tzinfo=row.timestamp.tzinfo or UTC),
             actor=row.actor,
+            context=EventContext(
+                flow_id=row.flow_id,
+                correlation_id=row.correlation_id,
+                causation_id=row.causation_id,
+                decision_id=row.decision_id,
+                agent_instance_id=row.agent_instance_id,
+                task_id=row.task_id,
+                tool_invocation_id=row.tool_invocation_id,
+                visibility=row.visibility,
+            ),
             payload=json.loads(row.payload_json),
             prev_hash=row.prev_hash,
             hash=row.hash,
         )
+
+    @staticmethod
+    def _event_context(
+        payload: dict[str, Any],
+        context: EventContext | dict[str, Any] | None,
+    ) -> EventContext:
+        result = (
+            context
+            if isinstance(context, EventContext)
+            else EventContext.model_validate(context or {})
+        )
+        if result.flow_id is not None:
+            return result
+        flow_id = payload.get("flow_id")
+        if flow_id is None and isinstance(payload.get("instance"), dict):
+            flow_id = payload["instance"].get("flow_id")
+        return result.model_copy(update={"flow_id": str(flow_id)}) if flow_id else result
+
+    @staticmethod
+    def _digest_input(
+        *,
+        schema_version: str,
+        event_id: str,
+        run_id: str,
+        sequence: int,
+        event_type: str,
+        timestamp: datetime,
+        actor: str,
+        payload: dict[str, Any],
+        prev_hash: str,
+        context: EventContext,
+    ) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "event_id": event_id,
+            "run_id": run_id,
+            "sequence": sequence,
+            "event_type": event_type,
+            "timestamp": timestamp.isoformat(),
+            "actor": actor,
+            "payload": payload,
+            "prev_hash": prev_hash,
+        }
+        if schema_version != "1.0":
+            value["schema_version"] = schema_version
+            value["context"] = context.model_dump(mode="json")
+        return value
 
     @staticmethod
     def _usage_int(usage: dict[str, Any], *keys: str) -> int:

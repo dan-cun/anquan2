@@ -1,0 +1,1 @@
+"""Isolated SecMind benchmark harness."""

@@ -135,7 +135,7 @@ const nativeStatus = {
   WAITING: 'waiting',
   COMPLETED: 'completed',
   FAILED: 'failed',
-  CANCELLED: 'failed',
+  CANCELLED: 'cancelled',
 }
 
 export function nativeCollaborationState(data) {

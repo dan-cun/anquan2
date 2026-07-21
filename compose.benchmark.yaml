@@ -1,0 +1,58 @@
+name: secmind-benchmark
+
+services:
+  backend:
+    build:
+      context: ./secmind/backend
+      dockerfile: ../../docker/backend.Dockerfile
+    image: secmind-backend:benchmark-current
+    environment:
+      SECMIND_APP_ENV: benchmark
+      SECMIND_LOG_LEVEL: ${SECMIND_BENCHMARK_LOG_LEVEL:-INFO}
+      SECMIND_DATA_DIR: /app/data
+      SECMIND_LEDGER_DIR: /app/data/ledger
+      SECMIND_DATABASE_URL: sqlite:////app/data/benchmark.db
+      SECMIND_CHECKPOINT_BACKEND: memory
+      SECMIND_CHECKPOINT_NAMESPACE: secmind-benchmark
+      SECMIND_PROJECTION_ENABLED: "false"
+      SECMIND_RUNTIME_INPUT_ROOT: /app/data/inputs
+      SECMIND_RUNTIME_UPLOAD_ROOT: /app/data/uploads
+      SECMIND_RUNTIME_RUN_ROOT: /app/data/runs
+      SECMIND_RUNTIME_DEMO_MODE: ${SECMIND_BENCHMARK_RUNTIME_DEMO_MODE:-true}
+      SECMIND_RUNTIME_MAX_UPLOAD_BYTES: ${SECMIND_BENCHMARK_MAX_UPLOAD_BYTES:-104857600}
+      SECMIND_RUNTIME_MAX_EXTRACTED_BYTES: ${SECMIND_BENCHMARK_MAX_EXTRACTED_BYTES:-524288000}
+      SECMIND_RUNTIME_MAX_FILES: ${SECMIND_BENCHMARK_MAX_FILES:-20000}
+      SECMIND_PROMPT_WORKBOOK_PATH: /app/config/native-prompts.xlsx
+      SECMIND_QDRANT_ENABLED: "false"
+      SECMIND_RATE_LIMIT_ENABLED: "false"
+      SECMIND_LLM_PROVIDER: ${SECMIND_BENCHMARK_LLM_PROVIDER:-null}
+      SECMIND_LLM_API_KEY: ${SECMIND_BENCHMARK_LLM_API_KEY:-}
+      SECMIND_LLM_BASE_URL: ${SECMIND_BENCHMARK_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      SECMIND_LLM_MODEL: ${SECMIND_BENCHMARK_LLM_MODEL:-qwen-plus}
+    ports:
+      - "127.0.0.1:${SECMIND_BENCHMARK_BACKEND_PORT:-18100}:8000"
+    volumes:
+      - benchmark_data:/app/data
+      - ./outputs/019f783d-d94a-7f22-8a31-533c5bdca81e/PentAGI原生Prompt中英对比版.xlsx:/app/config/native-prompts.xlsx:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: "no"
+
+volumes:
+  benchmark_data:
+    name: secmind_benchmark_data

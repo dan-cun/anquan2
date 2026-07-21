@@ -27,6 +27,7 @@ class LangGraphRuntime:
         "confirmation_gate",
         "ingest",
         "classify",
+        "collaborate",
         "retrieve_context",
         "plan",
         "validate_plan",
@@ -39,6 +40,8 @@ class LangGraphRuntime:
         "analyze",
         "verify",
         "reflect",
+        "secondary_review",
+        "completion_gate",
         "report",
         "memory_commit",
     )
@@ -64,6 +67,7 @@ class LangGraphRuntime:
                 "confirmation_gate": "confirmation_gate",
                 "ingest": "ingest",
                 "classify": "classify",
+                "collaborate": "collaborate",
                 "retrieve_context": "retrieve_context",
                 "select_step": "select_step",
                 "approval": "approval",
@@ -79,7 +83,8 @@ class LangGraphRuntime:
             self._route,
             {"classify": "classify", "report": "report"},
         )
-        builder.add_edge("classify", "retrieve_context")
+        builder.add_edge("classify", "collaborate")
+        builder.add_edge("collaborate", "retrieve_context")
         builder.add_edge("retrieve_context", "plan")
         builder.add_edge("plan", "validate_plan")
         builder.add_conditional_edges(
@@ -90,7 +95,11 @@ class LangGraphRuntime:
         builder.add_conditional_edges(
             "select_step",
             self._route,
-            {"guardrail": "guardrail", "report": "report"},
+            {
+                "guardrail": "guardrail",
+                "secondary_review": "secondary_review",
+                "report": "report",
+            },
         )
         builder.add_conditional_edges(
             "guardrail",
@@ -117,9 +126,16 @@ class LangGraphRuntime:
         builder.add_conditional_edges(
             "verify",
             self._route,
-            {"next": "select_step", "reflect": "reflect", "report": "report"},
+            {
+                "next": "select_step",
+                "reflect": "reflect",
+                "secondary_review": "secondary_review",
+                "report": "report",
+            },
         )
         builder.add_edge("reflect", "select_step")
+        builder.add_edge("secondary_review", "completion_gate")
+        builder.add_edge("completion_gate", "report")
         builder.add_edge("report", "memory_commit")
         builder.add_edge("memory_commit", END)
         self.graph = builder.compile(checkpointer=self.checkpointer)
@@ -129,9 +145,17 @@ class LangGraphRuntime:
         *,
         flow_id: str,
         task: TaskRequest,
+        run_id: str | None = None,
+        task_id: str | None = None,
         confirmation: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        state = await self.runtime.prepare_run(task, flow_id)
+        resolved_run_id = run_id or flow_id
+        state = await self.runtime.prepare_run(
+            task,
+            resolved_run_id,
+            flow_id=flow_id,
+            task_id=task_id,
+        )
         input_state: RuntimeGraphState = {
             "flow_id": flow_id,
             "runtime_state": state.model_dump(mode="json"),
@@ -140,7 +164,7 @@ class LangGraphRuntime:
             input_state["confirmation"] = confirmation
         async for update in self.graph.astream(
             input_state,
-            config=self._config(flow_id),
+            config=self._config(resolved_run_id),
             stream_mode="updates",
         ):
             yield update
@@ -161,7 +185,7 @@ class LangGraphRuntime:
     async def invoke_state(self, state: AgentState) -> AgentState:
         result = await self.graph.ainvoke(
             {
-                "flow_id": state.run_id,
+                "flow_id": state.flow_id or state.run_id,
                 "runtime_state": state.model_dump(mode="json"),
             },
             config=self._config(state.run_id),
@@ -200,6 +224,9 @@ class LangGraphRuntime:
 
     async def _classify(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_classify(self._state(value)))
+
+    async def _collaborate(self, value: RuntimeGraphState) -> RuntimeGraphState:
+        return self._update(await self.runtime.node_collaborate(self._state(value)))
 
     async def _retrieve_context(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_retrieve_context(self._state(value)))
@@ -264,6 +291,12 @@ class LangGraphRuntime:
     async def _reflect(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_reflect(self._state(value)))
 
+    async def _secondary_review(self, value: RuntimeGraphState) -> RuntimeGraphState:
+        return self._update(await self.runtime.node_secondary_review(self._state(value)))
+
+    async def _completion_gate(self, value: RuntimeGraphState) -> RuntimeGraphState:
+        return self._update(await self.runtime.node_completion_gate(self._state(value)))
+
     async def _report(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_report(self._state(value)))
 
@@ -299,6 +332,8 @@ class LangGraphRuntime:
             return "ingest"
         if runtime_state.scenario.value == "unknown":
             return "classify"
+        if not runtime_state.collaboration_completed:
+            return "collaborate"
         if not runtime_state.plan:
             return "retrieve_context"
         return "select_step"

@@ -57,6 +57,11 @@ NATIVE_TABLES = {
     "approvals",
     "llm_calls",
     "llm_usage",
+    "skills",
+    "skill_loads",
+    "task_todos",
+    "task_notes",
+    "context_snapshots",
 }
 
 

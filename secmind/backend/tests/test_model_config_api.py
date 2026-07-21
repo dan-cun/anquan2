@@ -77,7 +77,8 @@ def test_model_config_hot_swap_drives_runtime_and_usage(client):
             "attachments": [{"ref": upload.json()["ref"]}],
         },
     )
-    run_id = task.json()["run_id"]
+    identity = task.json()
+    run_id = identity["run_id"]
     status = "pending"
     for _ in range(100):
         status = client.get(f"/api/v1/runs/{run_id}").json()["status"]
@@ -89,7 +90,10 @@ def test_model_config_hot_swap_drives_runtime_and_usage(client):
     usage = client.get("/api/v1/model-usage")
     events = services.runtime_ledger.events(run_id)
 
-    assert status == "completed"
+    assert status == "partial"
+    assert report.json()["completion_gate_reason"].startswith(
+        "Finding task requires at least one finding"
+    )
     assert report.json()["executive_summary"] == "模型生成的安全审计摘要"
     assert [event.event_type for event in events if event.event_type.startswith("llm.")] == [
         "llm.request",
@@ -101,7 +105,7 @@ def test_model_config_hot_swap_drives_runtime_and_usage(client):
     assert usage_payload["request_count"] == 1
     assert usage_payload["total_tokens"] == 18
     assert usage_payload["by_model"][0]["model"] == "qwen-test"
-    assert usage_payload["by_conversation"][0]["flow_id"] == run_id
+    assert usage_payload["by_conversation"][0]["flow_id"] == identity["flow_id"]
     assert usage_payload["by_conversation"][0]["total_tokens"] == 18
 
     assert client.get("/api/v1/model-usage?period=day").status_code == 200

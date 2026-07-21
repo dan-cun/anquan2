@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
@@ -49,8 +48,12 @@ async def upload(file: Annotated[UploadFile, File(...)], settings: SettingsDep) 
 
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED)
 async def create_task(task: TaskRequest, services: AppServicesDep) -> dict[str, Any]:
-    run_id = services.runtime.submit(task)
-    return {"schema_version": "1.0", "run_id": run_id, "status": RunStatus.PENDING}
+    identity = services.execution.submit(task)
+    return {
+        "schema_version": "1.0",
+        **identity.model_dump(mode="json"),
+        "status": RunStatus.PENDING,
+    }
 
 
 @router.get("/runs/{run_id}")
@@ -123,16 +126,18 @@ async def resolve_approval(
 @router.websocket("/runs/{run_id}/events")
 async def events_socket(websocket: WebSocket, run_id: str, after_sequence: int = 0) -> None:
     services = websocket.app.state.services
+    if after_sequence < 0:
+        await websocket.close(code=4400, reason="after_sequence must not be negative")
+        return
     if services.runtime.ledger.load_state(run_id) is None:
         await websocket.close(code=4404, reason="Run not found")
         return
     await websocket.accept()
     try:
-        for stored_event in services.runtime.ledger.events(run_id, after_sequence=after_sequence):
-            await websocket.send_text(stored_event.model_dump_json())
-        async with services.runtime.event_hub.subscribe(run_id) as queue:
-            while True:
-                live_event = await queue.get()
-                await websocket.send_text(json.dumps(live_event, ensure_ascii=False))
+        async for event in services.runtime_event_stream.subscribe(
+            run_id,
+            after_sequence=after_sequence,
+        ):
+            await websocket.send_text(event.model_dump_json())
     except WebSocketDisconnect:
         return

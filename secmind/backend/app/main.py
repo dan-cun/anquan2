@@ -69,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "checkpoint_backend": resolved_settings.checkpoint_backend,
             "projection_enabled": resolved_settings.projection_enabled,
             "knowledge_backend": app.state.services.knowledge_backend,
+            "event_stream": await app.state.services.runtime_event_stream.stats(),
         }
 
     app.include_router(api_router, prefix=resolved_settings.api_prefix)

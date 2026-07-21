@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from app.graphql import types
 from app.schemas import agents as agent_models
+from app.schemas import long_term as long_term_models
 from app.schemas import prompts as prompt_models
 from app.schemas.flow import Flow as FlowModel
 from app.schemas.mcp import MCPCapability as MCPCapabilityModel
@@ -14,6 +15,9 @@ from app.schemas.runtime import (
     ApprovalRequest,
     InputArtifact,
     LedgerEvent,
+)
+from app.schemas.runtime import (
+    DecisionRecord as DecisionRecordModel,
 )
 from app.schemas.runtime import (
     Evidence as EvidenceModel,
@@ -230,18 +234,93 @@ def prompt_template(
     )
 
 
+def decision_record(model: DecisionRecordModel) -> types.DecisionRecord:
+    return types.DecisionRecord(
+        decision_id=model.decision_id,
+        kind=model.kind,
+        goal=model.goal,
+        decision=model.decision,
+        rationale_summary=model.rationale_summary,
+        evidence_ids=model.evidence_ids,
+        alternatives=[
+            types.DecisionAlternative(
+                option=item.option,
+                rejection_reason=item.rejection_reason,
+                evidence_ids=item.evidence_ids,
+            )
+            for item in model.alternatives
+        ],
+        expected_outcome=model.expected_outcome,
+        risk_summary=model.risk_summary,
+        actual_outcome=model.actual_outcome,
+        next_action=model.next_action,
+        policy_ids=model.policy_ids,
+        confidence=model.confidence,
+        model_id=model.model_id,
+        prompt_version=model.prompt_version,
+        created_at=model.created_at,
+    )
+
+
 def runtime_event(model: LedgerEvent) -> types.RuntimeEvent:
     return types.RuntimeEvent(
         event_id=model.event_id,
         run_id=model.run_id,
         sequence=model.sequence,
         event_type=model.event_type,
+        schema_version=model.schema_version,
+        category=model.category,
         actor=model.actor,
         payload=model.payload,
         timestamp=model.timestamp,
         prev_hash=model.prev_hash,
         hash=model.hash,
+        visibility=model.context.visibility,
+        flow_id=model.context.flow_id,
+        correlation_id=model.context.correlation_id,
+        causation_id=model.context.causation_id,
+        decision_id=model.context.decision_id,
+        agent_instance_id=model.context.agent_instance_id,
+        task_id=model.context.task_id,
+        tool_invocation_id=model.context.tool_invocation_id,
+        decision=None if model.decision is None else decision_record(model.decision),
+        verification_verdict=model.verification_verdict,
     )
+
+
+def skill(model: long_term_models.SkillDefinition) -> types.Skill:
+    return types.Skill(
+        skill_id=model.skill_id,
+        name=model.name,
+        description=model.description,
+        version=model.version,
+        content=model.content,
+        checksum=model.checksum,
+        tags=model.tags,
+        compatible_roles=model.compatible_roles,
+        source=model.source,
+        enabled=model.enabled,
+        metadata=model.metadata,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def skill_load(model: long_term_models.SkillLoad) -> types.SkillLoad:
+    return types.SkillLoad(**model.model_dump(exclude={"schema_version"}))
+
+
+def todo(model: long_term_models.TodoItem) -> types.Todo:
+    return types.Todo(**model.model_dump(exclude={"schema_version"}))
+
+
+def note(model: long_term_models.NoteRecord) -> types.Note:
+    return types.Note(**model.model_dump(exclude={"schema_version"}))
+
+
+def context_snapshot(model: long_term_models.ContextSnapshot) -> types.ContextSnapshot:
+    value = model.model_dump(exclude={"schema_version", "structured"})
+    return types.ContextSnapshot(**value, structured=model.structured.model_dump(mode="json"))
 
 
 def report(model: AgentReport) -> types.Report:

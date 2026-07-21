@@ -12,9 +12,13 @@ def test_websocket_mock_orchestrator(client):
 
         seen_types = []
         status_stages = []
-        for _ in range(20):
+        timeline = []
+        for _ in range(100):
             event = websocket.receive_json()
             seen_types.append(event["type"])
+            entry_type = event.get("payload", {}).get("entry", {}).get("event_type")
+            stage = event.get("payload", {}).get("stage")
+            timeline.append((event["type"], entry_type, stage))
             if event["type"] == "server.status":
                 status_stages.append(event["payload"].get("stage"))
             if event["type"] == "server.done":
@@ -24,6 +28,15 @@ def test_websocket_mock_orchestrator(client):
         assert "langgraph.node.completed" in status_stages
         assert "server.ledger_entry" in seen_types
         assert seen_types[-1] == "server.done"
+        runtime_queued = timeline.index(
+            ("server.ledger_entry", "runtime.run.queued", None)
+        )
+        first_node_status = next(
+            index
+            for index, (event_type, _entry_type, stage) in enumerate(timeline)
+            if event_type == "server.status" and stage == "langgraph.node.completed"
+        )
+        assert runtime_queued < first_node_status
 
 
 def test_websocket_accepts_short_chinese_input_and_returns_report(client):
@@ -37,7 +50,7 @@ def test_websocket_accepts_short_chinese_input_and_returns_report(client):
         )
 
         done = None
-        for _ in range(30):
+        for _ in range(100):
             event = websocket.receive_json()
             assert event["type"] != "server.error"
             if event["type"] == "server.done":
@@ -62,7 +75,7 @@ def test_websocket_approval_interrupt_roundtrip(client):
         )
 
         interrupt = None
-        for _ in range(30):
+        for _ in range(100):
             event = websocket.receive_json()
             if event["type"] == "server.interrupt":
                 interrupt = event
@@ -84,7 +97,7 @@ def test_websocket_approval_interrupt_roundtrip(client):
 
         seen_types = []
         done = None
-        for _ in range(30):
+        for _ in range(100):
             event = websocket.receive_json()
             seen_types.append(event["type"])
             if event["type"] == "server.done":

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from app.schemas.runtime import EventContext
 from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import LLMMessage, LLMProvider, LLMResponse
 
@@ -22,6 +23,9 @@ class LedgerLLMProvider(LLMProvider):
 
     async def complete(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
         run_id = kwargs.pop("run_id", None)
+        flow_id = kwargs.pop("flow_id", None)
+        task_id = kwargs.pop("task_id", None)
+        context = EventContext(flow_id=flow_id, task_id=task_id)
         trace_id = str(uuid4())
         if run_id is not None:
             self.ledger.append(
@@ -34,6 +38,7 @@ class LedgerLLMProvider(LLMProvider):
                     "messages": [message.model_dump(mode="json") for message in messages],
                     "parameters": kwargs,
                 },
+                context=context,
             )
 
         try:
@@ -50,6 +55,7 @@ class LedgerLLMProvider(LLMProvider):
                         "error_type": type(error).__name__,
                         "error": str(error),
                     },
+                    context=context,
                 )
             raise
 
@@ -65,5 +71,6 @@ class LedgerLLMProvider(LLMProvider):
                     "content": response.content,
                     "raw": response.raw,
                 },
+                context=context,
             )
         return response

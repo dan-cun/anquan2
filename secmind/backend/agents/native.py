@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -8,6 +9,8 @@ from typing import Any, Protocol
 from app.schemas.agents import (
     AgentDescriptor,
     AgentInstance,
+    AgentMessage,
+    AgentMessageKind,
     AgentResult,
     AgentRole,
     AgentStatus,
@@ -18,6 +21,7 @@ from llm.base import LLMProvider
 
 from .actions import ACTION_PROTOCOL, AgentActionError, AgentActionType, parse_agent_action
 from .chains import AgentMessageChain
+from .loop_guard import AgentLoopGuard, LoopGuardConfig
 
 
 class PromptResolver(Protocol):
@@ -34,6 +38,12 @@ class ToolGateway(Protocol):
 
 DelegateCallback = Callable[[AgentRole, AgentTask], Awaitable[AgentResult]]
 ToolCallback = Callable[[str, dict[str, Any]], Awaitable[UnifiedToolResult]]
+MessageCallback = Callable[
+    [str, str, AgentMessageKind, dict[str, Any]], Awaitable[AgentMessage]
+]
+WaitMessageCallback = Callable[[str, float | None], Awaitable[AgentMessage | None]]
+StopRequestedCallback = Callable[[], bool]
+RuntimeEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class StaticPromptResolver:
@@ -67,11 +77,16 @@ class AgentRunContext:
     chain: AgentMessageChain
     delegate_callback: DelegateCallback
     tool_callback: ToolCallback
+    message_callback: MessageCallback
+    wait_message_callback: WaitMessageCallback
+    stop_requested_callback: StopRequestedCallback
+    runtime_event_callback: RuntimeEventCallback
     child_results: list[AgentResult] = field(default_factory=list)
     tool_results: list[UnifiedToolResult] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     finding_ids: list[str] = field(default_factory=list)
+    long_term_context: dict[str, Any] = field(default_factory=dict)
 
     async def delegate(
         self,
@@ -82,13 +97,15 @@ class AgentRunContext:
         constraints: list[str] | None = None,
         expected_outputs: list[str] | None = None,
     ) -> AgentResult:
+        child_context_refs = list(self.task.context_refs)
+        _merge_unique(child_context_refs, context_refs or [])
         child_task = AgentTask(
             run_id=self.task.run_id,
             flow_id=self.task.flow_id,
             subtask_id=self.task.subtask_id,
             parent_agent_instance_id=self.instance.instance_id,
             objective=objective,
-            context_refs=context_refs or self.task.context_refs,
+            context_refs=child_context_refs,
             constraints=constraints or self.task.constraints,
             expected_outputs=expected_outputs or self.task.expected_outputs,
             metadata=self.task.metadata.copy(),
@@ -110,6 +127,39 @@ class AgentRunContext:
         _merge_unique(self.artifact_refs, result.artifact_refs)
         _merge_unique(self.evidence_ids, result.evidence_ids)
         return result
+
+    async def send_message(
+        self,
+        target_agent_instance_id: str,
+        summary: str,
+        *,
+        kind: AgentMessageKind = AgentMessageKind.STATUS,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentMessage:
+        return await self.message_callback(
+            target_agent_instance_id,
+            summary,
+            kind,
+            metadata or {},
+        )
+
+    async def wait_for_message(
+        self,
+        *,
+        reason: str,
+        timeout_seconds: float | None = None,
+    ) -> AgentMessage | None:
+        return await self.wait_message_callback(reason, timeout_seconds)
+
+    def stop_requested(self) -> bool:
+        return self.stop_requested_callback()
+
+    async def publish_runtime_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        await self.runtime_event_callback(event_type, payload)
 
 
 class NativeAgent(ABC):
@@ -134,6 +184,7 @@ class ModelNativeAgent(NativeAgent):
         prompts: PromptResolver,
         max_iterations: int = 24,
         max_reflections: int = 3,
+        loop_guard_config: LoopGuardConfig | None = None,
     ) -> None:
         super().__init__(descriptor)
         if max_iterations < 1:
@@ -144,6 +195,7 @@ class ModelNativeAgent(NativeAgent):
         self.prompts = prompts
         self.max_iterations = max_iterations
         self.max_reflections = max_reflections
+        self.loop_guard_config = loop_guard_config or LoopGuardConfig()
 
     async def run(self, context: AgentRunContext) -> AgentResult:
         prompt, prompt_version_id = await self.prompts.render(
@@ -155,6 +207,7 @@ class ModelNativeAgent(NativeAgent):
                 "ExpectedOutputs": context.task.expected_outputs,
                 "ContextRefs": context.task.context_refs,
                 "Capabilities": self.descriptor.capabilities,
+                "LongTermContext": context.long_term_context,
             },
         )
         context.instance.prompt_version_id = prompt_version_id
@@ -163,6 +216,13 @@ class ModelNativeAgent(NativeAgent):
             f"{prompt}\n\n{ACTION_PROTOCOL}",
             prompt_key=self.descriptor.prompt_key,
         )
+        if context.long_term_context:
+            context.chain.append(
+                "system",
+                "以下是可审计的长期任务状态。只按需加载 Skill；事实必须保留 Evidence 引用。\n"
+                + json.dumps(context.long_term_context, ensure_ascii=False, default=str),
+                context_kind="long_term_state",
+            )
         context.chain.append(
             "user",
             context.task.objective,
@@ -173,7 +233,10 @@ class ModelNativeAgent(NativeAgent):
         )
 
         reflection_count = 0
+        loop_guard = AgentLoopGuard(self.loop_guard_config)
         for iteration in range(1, self.max_iterations + 1):
+            if context.stop_requested():
+                return self._cancelled(context)
             response = await self.model.complete(
                 list(context.chain.messages),
                 stage=f"agent.{self.descriptor.role.value}",
@@ -191,6 +254,8 @@ class ModelNativeAgent(NativeAgent):
                 model=response.model,
                 iteration=iteration,
             )
+            if context.stop_requested():
+                return self._cancelled(context)
             try:
                 action = parse_agent_action(response.content)
             except AgentActionError:
@@ -219,6 +284,31 @@ class ModelNativeAgent(NativeAgent):
                 )
                 continue
 
+            action_fp, loop_detection, strategy_change = loop_guard.inspect_action(action)
+            if strategy_change is not None:
+                await context.publish_runtime_event(
+                    "strategy.changed",
+                    strategy_change.event_payload(),
+                )
+            if loop_detection is not None:
+                await context.publish_runtime_event(
+                    "loop.detected",
+                    loop_detection.event_payload(),
+                )
+                context.chain.append(
+                    "tool",
+                    loop_detection.model_instruction(),
+                    loop_guard=True,
+                    detection_id=loop_detection.detection_id,
+                )
+                if loop_detection.terminal:
+                    return self._failed(
+                        context,
+                        code="AGENT_LOOP_DETECTED",
+                        message="Agent ignored repeated loop-guard strategy-change requests",
+                    )
+                continue
+
             if action.action == AgentActionType.COMPLETE:
                 return self._complete(
                     context,
@@ -244,6 +334,32 @@ class ModelNativeAgent(NativeAgent):
                     delegated_role=action.role.value,
                     result_status=result.status.value,
                 )
+                loop_detection = loop_guard.record_result(
+                    action_fp,
+                    result,
+                    artifact_refs=context.artifact_refs,
+                    evidence_ids=context.evidence_ids,
+                    finding_ids=context.finding_ids,
+                )
+                if loop_detection is not None:
+                    await context.publish_runtime_event(
+                        "loop.detected",
+                        loop_detection.event_payload(),
+                    )
+                    context.chain.append(
+                        "tool",
+                        loop_detection.model_instruction(),
+                        loop_guard=True,
+                        detection_id=loop_detection.detection_id,
+                    )
+                    if loop_detection.terminal:
+                        return self._failed(
+                            context,
+                            code="AGENT_LOOP_DETECTED",
+                            message=(
+                                "Agent ignored repeated loop-guard strategy-change requests"
+                            ),
+                        )
                 continue
 
             assert action.tool_id is not None
@@ -254,6 +370,30 @@ class ModelNativeAgent(NativeAgent):
                 tool_id=action.tool_id,
                 result_status=tool_result.status.value,
             )
+            loop_detection = loop_guard.record_result(
+                action_fp,
+                tool_result,
+                artifact_refs=context.artifact_refs,
+                evidence_ids=context.evidence_ids,
+                finding_ids=context.finding_ids,
+            )
+            if loop_detection is not None:
+                await context.publish_runtime_event(
+                    "loop.detected",
+                    loop_detection.event_payload(),
+                )
+                context.chain.append(
+                    "tool",
+                    loop_detection.model_instruction(),
+                    loop_guard=True,
+                    detection_id=loop_detection.detection_id,
+                )
+                if loop_detection.terminal:
+                    return self._failed(
+                        context,
+                        code="AGENT_LOOP_DETECTED",
+                        message="Agent ignored repeated loop-guard strategy-change requests",
+                    )
 
         return self._failed(
             context,
@@ -301,5 +441,20 @@ class ModelNativeAgent(NativeAgent):
             finding_ids=list(context.finding_ids),
             error_code=code,
             error_message=message,
+            started_at=context.instance.started_at,
+        )
+
+    @staticmethod
+    def _cancelled(context: AgentRunContext) -> AgentResult:
+        return AgentResult(
+            agent_instance_id=context.instance.instance_id,
+            task_id=context.task.task_id,
+            status=AgentStatus.CANCELLED,
+            summary="Agent stopped by request",
+            artifact_refs=list(context.artifact_refs),
+            evidence_ids=list(context.evidence_ids),
+            finding_ids=list(context.finding_ids),
+            error_code="AGENT_STOP_REQUESTED",
+            error_message="Agent stopped by request",
             started_at=context.instance.started_at,
         )

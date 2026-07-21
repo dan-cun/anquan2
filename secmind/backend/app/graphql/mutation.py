@@ -5,22 +5,36 @@ import strawberry
 from app.graphql.context import GraphQLContext, get_backend
 from app.graphql.types import (
     AgentDelegation,
+    AgentInstance,
+    AgentMessage,
     Approval,
     Assistant,
+    ContextSnapshot,
+    CreateAgentInput,
     CreateAssistantInput,
     CreateFlowInput,
     CreatePromptVersionInput,
+    CreateTodoInput,
     DelegateAgentInput,
     Flow,
+    LoadSkillInput,
     MCPServer,
+    Note,
     PromptTemplate,
     PromptVersion,
+    RecordNoteInput,
     RegisterMCPServerInput,
+    RegisterSkillInput,
     RevisePlanInput,
+    SendAgentMessageInput,
+    Skill,
+    SkillLoad,
     SubmitFlowInput,
     Subtask,
     Task,
+    Todo,
     UpdateMCPServerInput,
+    UpdateTodoInput,
 )
 
 
@@ -183,6 +197,43 @@ class Mutation:
     ) -> AgentDelegation:
         return await get_backend(info).agents.delegate(input)
 
+    @strawberry.mutation
+    async def create_agent(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        input: CreateAgentInput,
+    ) -> AgentInstance:
+        return await get_backend(info).agents.create(input)
+
+    @strawberry.mutation
+    async def send_agent_message(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        input: SendAgentMessageInput,
+    ) -> AgentMessage:
+        return await get_backend(info).agents.send_message(input)
+
+    @strawberry.mutation
+    async def wait_agent(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        agent_instance_id: strawberry.ID,
+        timeout_seconds: int = 30,
+    ) -> AgentInstance:
+        return await get_backend(info).agents.wait_agent(
+            str(agent_instance_id),
+            timeout_seconds,
+        )
+
+    @strawberry.mutation
+    async def stop_agent(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        agent_instance_id: strawberry.ID,
+        reason: str = "Operator requested stop",
+    ) -> AgentInstance:
+        return await get_backend(info).agents.stop_agent(str(agent_instance_id), reason)
+
     @strawberry.mutation(name="registerMCPServer")
     async def register_mcp_server(
         self,
@@ -247,3 +298,76 @@ class Mutation:
         workbook_ref: str,
     ) -> list[PromptTemplate]:
         return list(await get_backend(info).prompts.import_workbook(workbook_ref))
+
+    @strawberry.mutation
+    async def register_skill(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        input: RegisterSkillInput,
+    ) -> Skill:
+        return await get_backend(info).long_term.register_skill(input)
+
+    @strawberry.mutation
+    async def load_skill(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        input: LoadSkillInput,
+    ) -> SkillLoad:
+        return await get_backend(info).long_term.load_skill(input)
+
+    @strawberry.mutation
+    async def unload_skill(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        load_id: strawberry.ID,
+    ) -> SkillLoad:
+        return await get_backend(info).long_term.unload_skill(str(load_id))
+
+    @strawberry.mutation
+    async def create_todo(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        input: CreateTodoInput,
+    ) -> Todo:
+        return await get_backend(info).long_term.create_todo(input)
+
+    @strawberry.mutation
+    async def update_todo(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        todo_id: strawberry.ID,
+        input: UpdateTodoInput,
+    ) -> Todo:
+        return await get_backend(info).long_term.update_todo(str(todo_id), input)
+
+    @strawberry.mutation
+    async def record_note(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        input: RecordNoteInput,
+    ) -> Note:
+        return await get_backend(info).long_term.record_note(input)
+
+    @strawberry.mutation
+    async def archive_note(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        note_id: strawberry.ID,
+    ) -> Note:
+        return await get_backend(info).long_term.archive_note(str(note_id))
+
+    @strawberry.mutation
+    async def compress_context(
+        self,
+        info: strawberry.Info[GraphQLContext, None],
+        run_id: strawberry.ID,
+        flow_id: strawberry.ID,
+        agent_instance_id: strawberry.ID | None = strawberry.UNSET,
+    ) -> ContextSnapshot:
+        return await get_backend(info).long_term.compress_context(
+            str(run_id),
+            str(flow_id),
+            None
+            if agent_instance_id is strawberry.UNSET or agent_instance_id is None
+            else str(agent_instance_id),
+        )
