@@ -181,8 +181,8 @@ Both Compose files load non-secret model settings from `config/model-public.env`
 from ignored `benchmark/runtime.env`, and mount `config/mcp-servers.json` read-only. The common MCP
 catalog expects Fetch, Chrome DevTools, Web Security, and CyberChef on host ports 9011-9014.
 
-Preflight validates the exact four Server IDs, all-connected state, 49 unified tools
-(10 native and 39 MCP), runtime image ID, source commit, clean Git state, and the deployment
+Preflight validates the exact four Server IDs, all-connected state, 53 unified tools
+(10 native and 43 MCP), runtime image ID, source commit, clean Git state, and the deployment
 manifest. It also records SHA-256 summaries for the Prompt workbook, public model profile, MCP
 definition, and live tool definitions. Real benchmark execution defaults to demo mode off; any
 failed provenance check or missing model key blocks the static smoke run.

@@ -6,9 +6,9 @@
     "local-http-fetch",
     "local-web-security"
   ],
-  "expected_tool_count": 49,
+  "expected_tool_count": 53,
   "expected_native_tool_count": 10,
-  "expected_mcp_tool_count": 39,
+  "expected_mcp_tool_count": 43,
   "version_sources": {
     "prompt": {
       "version": "native-prompts-2026-07-21",
