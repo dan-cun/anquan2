@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 from typing import Any
 from urllib.parse import urlparse
 
-from llm.base import LLMMessage, LLMProvider, LLMResponse
+from pydantic import ValidationError
+
+from llm.base import LLMMessage, LLMProvider, LLMResponse, ProviderHTTPError
 from llm.http_client import create_http_client
+from llm.provider_request import ProviderRequest
+from tools.safety import redact_tool_value, safe_error_message
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -20,6 +25,8 @@ class OpenAICompatibleProvider(LLMProvider):
         model: str,
         timeout_seconds: float = 60.0,
         temperature: float = 0.2,
+        thinking_enabled: bool = True,
+        reasoning_effort: str = "max",
     ) -> None:
         self.name = name
         self.api_key = api_key
@@ -27,6 +34,8 @@ class OpenAICompatibleProvider(LLMProvider):
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
 
     @staticmethod
     def _validate_base_url(base_url: str) -> str:
@@ -57,11 +66,17 @@ class OpenAICompatibleProvider(LLMProvider):
             "model": self.model,
             "timeout_seconds": self.timeout_seconds,
             "temperature": self.temperature,
+            "thinking_enabled": self.thinking_enabled,
+            "reasoning_effort": self.reasoning_effort,
         }
 
     async def complete(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
-        payload = {
-            "model": kwargs.pop("model", self.model),
+        model = kwargs.pop("model", self.model)
+        temperature = kwargs.pop("temperature", self.temperature)
+        response_schema = kwargs.pop("response_schema", None)
+        json_mode = bool(kwargs.pop("json_mode", response_schema is not None))
+        request_values: dict[str, Any] = {
+            "model": model,
             "messages": [
                 {
                     "role": message.role,
@@ -69,10 +84,45 @@ class OpenAICompatibleProvider(LLMProvider):
                 }
                 for message in messages
             ],
-            "temperature": kwargs.pop("temperature", self.temperature),
+            "temperature": temperature,
             "stream": False,
         }
-        payload.update(kwargs)
+        request_values.update(kwargs)
+        if json_mode:
+            if self.name == "deepseek":
+                request_values["response_format"] = {"type": "json_object"}
+                request_values["thinking"] = {
+                    "type": "enabled" if self.thinking_enabled else "disabled"
+                }
+                request_values["reasoning_effort"] = self.reasoning_effort
+                if isinstance(response_schema, dict):
+                    schema_text = json.dumps(
+                        response_schema,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    request_values["messages"][0]["content"] += (
+                        "\nReturn exactly one JSON object matching this schema: " + schema_text
+                    )
+            elif isinstance(response_schema, dict):
+                request_values["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "secmind_output", "schema": response_schema},
+                }
+            else:
+                request_values["response_format"] = {"type": "json_object"}
+        try:
+            request = ProviderRequest.model_validate(request_values)
+        except ValidationError as error:
+            fields = sorted(
+                ".".join(str(part) for part in item["loc"])
+                for item in error.errors(include_url=False)
+            )
+            raise ValueError(
+                "Unsupported or invalid chat-completions parameter(s): " + ", ".join(fields)
+            ) from error
+        payload = request.payload()
 
         async with create_http_client() as client:
             response = await client.post(
@@ -84,7 +134,15 @@ class OpenAICompatibleProvider(LLMProvider):
                 json=payload,
                 timeout=self.timeout_seconds,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                raise ProviderHTTPError(
+                    response.status_code,
+                    self._error_diagnostics(
+                        response=response,
+                        payload=payload,
+                        response_schema=response_schema,
+                    ),
+                )
             raw = response.json()
 
         choice = raw.get("choices", [{}])[0]
@@ -95,3 +153,40 @@ class OpenAICompatibleProvider(LLMProvider):
             provider=self.name,
             raw=raw,
         )
+
+    @staticmethod
+    def _error_diagnostics(
+        *,
+        response: Any,
+        payload: dict[str, Any],
+        response_schema: Any,
+    ) -> dict[str, Any]:
+        try:
+            response_body = redact_tool_value(response.json())
+        except (ValueError, TypeError):
+            response_body = safe_error_message(response.text, max_length=4_000)
+        messages = payload.get("messages")
+        message_items = messages if isinstance(messages, list) else []
+        character_count = sum(
+            len(str(item.get("content") or "")) for item in message_items if isinstance(item, dict)
+        )
+        schema_size = (
+            len(
+                json.dumps(
+                    response_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if isinstance(response_schema, dict)
+            else 0
+        )
+        return {
+            "status_code": response.status_code,
+            "response_body": response_body,
+            "request_fields": sorted(payload),
+            "message_count": len(message_items),
+            "character_count": character_count,
+            "schema_size_bytes": schema_size,
+        }

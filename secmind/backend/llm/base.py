@@ -19,6 +19,13 @@ class LLMResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProviderHTTPError(RuntimeError):
+    def __init__(self, status_code: int, diagnostics: dict[str, Any]) -> None:
+        super().__init__(f"Model provider returned HTTP {status_code}")
+        self.status_code = status_code
+        self.diagnostics = diagnostics
+
+
 class LLMProvider(ABC):
     name: str
 

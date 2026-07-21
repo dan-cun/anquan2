@@ -7,9 +7,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from app.schemas.runtime import AgentState, RunStatus, TaskRequest
+from app.schemas.runtime import AgentState, CapabilityStatus, RunStatus, TaskRequest
 from app.services.runtime import RuntimeRunService
 from ledger.checkpoints import checkpoint_config
+from ledger.serialization import checkpoint_roundtrip
 
 
 class RuntimeGraphState(TypedDict, total=False):
@@ -27,6 +28,8 @@ class LangGraphRuntime:
         "confirmation_gate",
         "ingest",
         "classify",
+        "capability_route",
+        "universal_primary",
         "collaborate",
         "retrieve_context",
         "plan",
@@ -67,10 +70,13 @@ class LangGraphRuntime:
                 "confirmation_gate": "confirmation_gate",
                 "ingest": "ingest",
                 "classify": "classify",
+                "capability_route": "capability_route",
+                "universal_primary": "universal_primary",
                 "collaborate": "collaborate",
                 "retrieve_context": "retrieve_context",
                 "select_step": "select_step",
                 "approval": "approval",
+                "report": "report",
             },
         )
         builder.add_conditional_edges(
@@ -83,14 +89,24 @@ class LangGraphRuntime:
             self._route,
             {"classify": "classify", "report": "report"},
         )
-        builder.add_edge("classify", "collaborate")
+        builder.add_edge("classify", "capability_route")
+        builder.add_edge("capability_route", "universal_primary")
+        builder.add_conditional_edges(
+            "universal_primary",
+            self._route,
+            {"collaborate": "collaborate", "report": "report"},
+        )
         builder.add_edge("collaborate", "retrieve_context")
         builder.add_edge("retrieve_context", "plan")
         builder.add_edge("plan", "validate_plan")
         builder.add_conditional_edges(
             "validate_plan",
             self._route,
-            {"select_step": "select_step", "report": "report"},
+            {
+                "select_step": "select_step",
+                "secondary_review": "secondary_review",
+                "report": "report",
+            },
         )
         builder.add_conditional_edges(
             "select_step",
@@ -119,7 +135,11 @@ class LangGraphRuntime:
         builder.add_conditional_edges(
             "execute",
             self._route,
-            {"observe": "observe", "report": "report"},
+            {
+                "observe": "observe",
+                "secondary_review": "secondary_review",
+                "report": "report",
+            },
         )
         builder.add_edge("observe", "analyze")
         builder.add_edge("analyze", "verify")
@@ -156,10 +176,12 @@ class LangGraphRuntime:
             flow_id=flow_id,
             task_id=task_id,
         )
-        input_state: RuntimeGraphState = {
-            "flow_id": flow_id,
-            "runtime_state": state.model_dump(mode="json"),
-        }
+        input_state: RuntimeGraphState = checkpoint_roundtrip(
+            {
+                "flow_id": flow_id,
+                "runtime_state": state.model_dump(mode="json"),
+            }
+        )
         if confirmation is not None:
             input_state["confirmation"] = confirmation
         async for update in self.graph.astream(
@@ -184,10 +206,12 @@ class LangGraphRuntime:
 
     async def invoke_state(self, state: AgentState) -> AgentState:
         result = await self.graph.ainvoke(
-            {
-                "flow_id": state.flow_id or state.run_id,
-                "runtime_state": state.model_dump(mode="json"),
-            },
+            checkpoint_roundtrip(
+                {
+                    "flow_id": state.flow_id or state.run_id,
+                    "runtime_state": state.model_dump(mode="json"),
+                }
+            ),
             config=self._config(state.run_id),
         )
         return self._state(result)
@@ -225,6 +249,19 @@ class LangGraphRuntime:
     async def _classify(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_classify(self._state(value)))
 
+    async def _capability_route(self, value: RuntimeGraphState) -> RuntimeGraphState:
+        return self._update(await self.runtime.node_capability_route(self._state(value)))
+
+    async def _universal_primary(self, value: RuntimeGraphState) -> RuntimeGraphState:
+        state = await self.runtime.node_universal_primary(self._state(value))
+        route = (
+            "report"
+            if state.capability_plan is not None
+            and state.capability_plan.status == CapabilityStatus.UNAVAILABLE
+            else "collaborate"
+        )
+        return self._update(state, route)
+
     async def _collaborate(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_collaborate(self._state(value)))
 
@@ -236,7 +273,11 @@ class LangGraphRuntime:
 
     async def _validate_plan(self, value: RuntimeGraphState) -> RuntimeGraphState:
         state = await self.runtime.node_validate_plan(self._state(value))
-        route = "report" if state.status == RunStatus.FAILED or not state.plan else "select_step"
+        route = (
+            "report"
+            if state.status in {RunStatus.DENIED, RunStatus.FAILED}
+            else "select_step" if state.plan else "secondary_review"
+        )
         return self._update(state, route)
 
     async def _select_step(self, value: RuntimeGraphState) -> RuntimeGraphState:
@@ -270,12 +311,12 @@ class LangGraphRuntime:
     async def _execute(self, value: RuntimeGraphState) -> RuntimeGraphState:
         before = len(self._state(value).observations)
         state = await self.runtime.node_execute(self._state(value))
-        route = (
-            "report"
-            if state.status in {RunStatus.PARTIAL, RunStatus.DENIED, RunStatus.FAILED}
-            or len(state.observations) <= before
-            else "observe"
-        )
+        if state.status in {RunStatus.DENIED, RunStatus.FAILED}:
+            route = "report"
+        elif len(state.observations) <= before:
+            route = "secondary_review"
+        else:
+            route = "observe"
         return self._update(state, route)
 
     async def _observe(self, value: RuntimeGraphState) -> RuntimeGraphState:
@@ -319,7 +360,7 @@ class LangGraphRuntime:
             update["route"] = route
         if denied is not None:
             update["denied"] = denied
-        return update
+        return checkpoint_roundtrip(update)
 
     @staticmethod
     def _start_route(state: RuntimeGraphState) -> str:
@@ -330,8 +371,14 @@ class LangGraphRuntime:
             return "approval"
         if not runtime_state.workspace:
             return "ingest"
-        if runtime_state.scenario.value == "unknown":
+        if not runtime_state.classification_completed:
             return "classify"
+        if runtime_state.capability_plan is None:
+            return "capability_route"
+        if not runtime_state.primary_persisted:
+            return "universal_primary"
+        if runtime_state.capability_plan.status == CapabilityStatus.UNAVAILABLE:
+            return "report"
         if not runtime_state.collaboration_completed:
             return "collaborate"
         if not runtime_state.plan:

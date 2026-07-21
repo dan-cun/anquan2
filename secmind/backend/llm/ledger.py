@@ -7,6 +7,18 @@ from app.schemas.runtime import EventContext
 from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import LLMMessage, LLMProvider, LLMResponse
 
+TRACE_PARAMETER_KEYS = frozenset(
+    {
+        "stage",
+        "model_profile",
+        "agent_instance_id",
+        "subtask_id",
+        "iteration",
+        "prompt_key",
+        "prompt_version_id",
+    }
+)
+
 
 class LedgerLLMProvider(LLMProvider):
     """Record model input/output around another provider without changing its API."""
@@ -25,7 +37,14 @@ class LedgerLLMProvider(LLMProvider):
         run_id = kwargs.pop("run_id", None)
         flow_id = kwargs.pop("flow_id", None)
         task_id = kwargs.pop("task_id", None)
-        context = EventContext(flow_id=flow_id, task_id=task_id)
+        trace_parameters = {
+            key: kwargs.pop(key) for key in sorted(TRACE_PARAMETER_KEYS) if key in kwargs
+        }
+        context = EventContext(
+            flow_id=flow_id,
+            task_id=task_id,
+            agent_instance_id=trace_parameters.get("agent_instance_id"),
+        )
         trace_id = str(uuid4())
         if run_id is not None:
             self.ledger.append(
@@ -37,6 +56,7 @@ class LedgerLLMProvider(LLMProvider):
                     "provider": self.provider.name,
                     "messages": [message.model_dump(mode="json") for message in messages],
                     "parameters": kwargs,
+                    "trace_parameters": trace_parameters,
                 },
                 context=context,
             )
@@ -45,6 +65,7 @@ class LedgerLLMProvider(LLMProvider):
             response = await self.provider.complete(messages, **kwargs)
         except Exception as error:
             if run_id is not None:
+                diagnostics = getattr(error, "diagnostics", None)
                 self.ledger.append(
                     run_id,
                     event_type="llm.error",
@@ -54,6 +75,7 @@ class LedgerLLMProvider(LLMProvider):
                         "provider": self.provider.name,
                         "error_type": type(error).__name__,
                         "error": str(error),
+                        "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
                     },
                     context=context,
                 )

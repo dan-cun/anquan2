@@ -267,6 +267,7 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
         publisher=publish_verification_event,
     )
     register_verifier_tool(unified_gateway, verifier)
+    runtime.set_tool_catalog_provider(unified_gateway.definitions)
     prompt_registry = NativePromptRegistry(repositories.prompts)
     if settings.prompt_workbook_path is not None:
         prompt_registry.import_workbook(settings.prompt_workbook_path)
@@ -330,6 +331,11 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
             metadata={
                 "review_round": review_round,
                 "workspace_ref": workspace_refs[0],
+                "allowed_tool_ids": (
+                    state.capability_plan.allowed_tool_ids
+                    if state.capability_plan is not None
+                    else []
+                ),
             },
             role=role,
         )
@@ -344,12 +350,8 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
             result=report,
         )
         run_id = str(report["run_id"])
-        known_artifacts = {
-            item.artifact_id for item in repositories.results.list_artifacts(run_id)
-        }
-        known_evidence = {
-            item.evidence_id for item in repositories.results.list_evidence(run_id)
-        }
+        known_artifacts = {item.artifact_id for item in repositories.results.list_artifacts(run_id)}
+        known_evidence = {item.evidence_id for item in repositories.results.list_evidence(run_id)}
         for item in report.get("evidence", []):
             evidence_id = str(item["evidence_id"])
             if evidence_id in known_evidence:
@@ -365,9 +367,7 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
                 metadata=dict(item.get("metadata") or {}),
             )
             known_evidence.add(evidence_id)
-        known_findings = {
-            item.finding_id for item in repositories.results.list_findings(run_id)
-        }
+        known_findings = {item.finding_id for item in repositories.results.list_findings(run_id)}
         for item in report.get("findings", []):
             finding_id = str(item["finding_id"])
             if finding_id in known_findings:

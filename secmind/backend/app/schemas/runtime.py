@@ -243,6 +243,19 @@ class CompletionMode(StrEnum):
     FINAL_ANSWER = "final_answer"
 
 
+class CapabilityStatus(StrEnum):
+    READY = "ready"
+    DEGRADED = "degraded"
+    UNAVAILABLE = "capability_unavailable"
+
+
+class UnitOutcomeStatus(StrEnum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    INCONCLUSIVE = "inconclusive"
+
+
 class ExecutionIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -283,6 +296,89 @@ class InputArtifact(BaseModel):
     sha256: str
     size_bytes: int
     media_type: str = "application/octet-stream"
+
+
+class CapabilityRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    capability: str
+    required: bool = True
+    satisfied: bool
+    matched_tool_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class CapabilityPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_kind: str
+    languages: list[str] = Field(default_factory=list)
+    dynamic_target: bool = False
+    status: CapabilityStatus
+    requirements: list[CapabilityRequirement] = Field(default_factory=list)
+    allowed_tool_ids: list[str] = Field(default_factory=list)
+    unavailable_reason: str | None = None
+
+
+class PrimaryFindingCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str = "PRIMARY-CANDIDATE"
+    title: str
+    path: str = "unknown"
+    line: int | None = None
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"] = "UNKNOWN"
+    root_cause: str
+    impact: str
+    remediation: str
+    evidence_gap: str | None = None
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class UniversalPrimaryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: UnitOutcomeStatus
+    final_answer: str | None = None
+    executive_summary: str
+    findings: list[PrimaryFindingCandidate] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
+    limitations: list[str] = Field(default_factory=list)
+
+    @field_validator("final_answer")
+    @classmethod
+    def normalize_final_answer(cls, value: str | None) -> str | None:
+        normalized = value.strip() if isinstance(value, str) else None
+        return normalized or None
+
+
+class ExecutionReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receipt_id: str = Field(default_factory=lambda: str(uuid4()))
+    unit_type: Literal["agent", "tool", "workspace_chunk", "verification", "primary"]
+    unit_id: str
+    status: UnitOutcomeStatus
+    attempt: int = Field(default=1, ge=1)
+    error_type: str | None = None
+    error_message: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    finding_ids: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class VerificationDelta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delta_id: str = Field(default_factory=lambda: str(uuid4()))
+    source: str
+    finding_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    final_answer_verified: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class PlanStep(BaseModel):
@@ -442,6 +538,10 @@ class AgentReport(BaseModel):
     agent_results: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    capability_plan: CapabilityPlan | None = None
+    primary_result: UniversalPrimaryResult | None = None
+    receipts: list[ExecutionReceipt] = Field(default_factory=list)
+    verified_deltas: list[VerificationDelta] = Field(default_factory=list)
     final_answer: str | None = None
     final_answer_verified: bool = False
     completion_mode: CompletionMode = CompletionMode.FINDINGS
@@ -461,9 +561,15 @@ class AgentState(BaseModel):
     task_id: str | None = None
     task: TaskRequest
     scenario: Scenario = Scenario.UNKNOWN
+    classification_completed: bool = False
     status: RunStatus = RunStatus.PENDING
     workspace: str = ""
     input_artifacts: list[InputArtifact] = Field(default_factory=list)
+    capability_plan: CapabilityPlan | None = None
+    primary_result: UniversalPrimaryResult | None = None
+    primary_persisted: bool = False
+    receipts: list[ExecutionReceipt] = Field(default_factory=list)
+    verified_deltas: list[VerificationDelta] = Field(default_factory=list)
     knowledge_hits: list[KnowledgeHit] = Field(default_factory=list)
     plan: list[PlanStep] = Field(default_factory=list)
     current_step_index: int = 0

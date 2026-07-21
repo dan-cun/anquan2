@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     llm_embedding_model: str = "text-embedding-v3"
     llm_timeout_seconds: float = 60.0
     llm_temperature: float = 0.2
+    llm_thinking_enabled: bool = True
+    llm_reasoning_effort: Literal["high", "max"] = "max"
 
     qdrant_enabled: bool = False
     qdrant_url: str = "http://127.0.0.1:6333"

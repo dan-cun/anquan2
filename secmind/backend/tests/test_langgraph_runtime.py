@@ -10,8 +10,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from agents.guardrail import Guardrail
 from app.core.config import Settings
 from app.schemas.runtime import (
+    CapabilityPlan,
+    CapabilityStatus,
     Evidence,
     Finding,
+    InputArtifact,
     PlanStep,
     RiskLevel,
     RunStatus,
@@ -21,6 +24,8 @@ from app.schemas.runtime import (
     TaskRequest,
     ToolManifest,
     ToolStatus,
+    UnitOutcomeStatus,
+    UniversalPrimaryResult,
 )
 from app.services.runtime import RuntimeEventHub, RuntimeRunService
 from ledger.runtime_store import RuntimeLedgerStore
@@ -38,7 +43,19 @@ class ControlledModelManager:
     async def complete(self, messages: list[Any], **kwargs: Any) -> LLMResponse:
         stage = str(kwargs["stage"])
         self.stages.append(stage)
-        if stage == "plan":
+        if stage == "universal_primary":
+            content = json.dumps(
+                {
+                    "status": "success",
+                    "final_answer": None,
+                    "executive_summary": "Universal Primary completed.",
+                    "findings": [],
+                    "evidence_gaps": ["Specialist verification is pending."],
+                    "confidence": 0.5,
+                    "limitations": [],
+                }
+            )
+        elif stage == "plan":
             content = json.dumps(
                 {
                     "steps": [
@@ -134,9 +151,11 @@ def build_runtime(
     idempotent: bool = True,
     emit_finding: bool = True,
 ) -> tuple[RuntimeRunService, ControlledTool, ControlledModelManager]:
+    database_url = f"sqlite:///{(tmp_path / 'runtime.db').as_posix()}"
     settings = Settings(
         data_dir=tmp_path / "data",
-        runtime_database_url=f"sqlite:///{(tmp_path / 'runtime.db').as_posix()}",
+        database_url=database_url,
+        runtime_database_url=database_url,
         runtime_input_root=tmp_path / "inputs",
         runtime_run_root=tmp_path / "runs",
         runtime_upload_root=tmp_path / "uploads",
@@ -168,7 +187,7 @@ def build_runtime(
 
 
 def audit_task(**updates: Any) -> TaskRequest:
-    return TaskRequest(objective="audit code with the controlled tool", **updates)
+    return TaskRequest(objective="audit Python code with the controlled tool", **updates)
 
 
 def test_complete_topology_and_checkpointer_injection(tmp_path: Path) -> None:
@@ -251,9 +270,9 @@ async def test_model_budget_caps_managed_calls(tmp_path: Path) -> None:
 
     assert state.status.value == "completed"
     assert state.budget.model_calls_used == 2
-    assert model.stages == ["plan", "analyze"]
+    assert model.stages == ["universal_primary", "plan"]
     assert state.report is not None
-    assert state.report.executive_summary.startswith("Code audit completed")
+    assert state.report.executive_summary == "Universal Primary completed."
 
 
 @pytest.mark.asyncio
@@ -279,7 +298,7 @@ async def test_plan_analyze_verify_and_report_use_managed_model(tmp_path: Path) 
     state = await runtime.run_inline(audit_task(), "model-stages-run")
 
     assert state.status.value == "completed"
-    assert model.stages == ["plan", "analyze", "verify", "report"]
+    assert model.stages == ["universal_primary", "plan", "analyze", "verify", "report"]
     assert state.report is not None
     assert state.report.executive_summary == "controlled report output"
 
@@ -368,6 +387,16 @@ async def test_collaboration_products_share_identity_and_enter_report(tmp_path: 
     assert len(state.report.agent_results) == 2
     assert state.report.artifacts[0]["artifact_id"] == "artifact-1"
     assert state.report.tool_calls[0]["invocation_id"] == "tool-call-1"
+    assert any(
+        item.finding_ids == ["collab-finding"] for item in state.verified_deltas
+    )
+    assert {item.unit_type for item in state.receipts} >= {
+        "agent",
+        "tool",
+        "verification",
+    }
+    assert state.report.verified_deltas == state.verified_deltas
+    assert state.report.receipts == state.receipts
 
 
 @pytest.mark.asyncio
@@ -522,3 +551,120 @@ async def test_execute_node_reuses_completed_execution_key(tmp_path: Path) -> No
         event.event_type == "tool.replayed"
         for event in runtime.ledger.events("idempotent-run")
     )
+
+
+@pytest.mark.asyncio
+async def test_universal_primary_is_language_agnostic(tmp_path: Path) -> None:
+    runtime, _, model = build_runtime(tmp_path)
+
+    state = await runtime.run_inline(
+        TaskRequest(
+            objective="Provide a final answer for this repository-independent logic task",
+            expected_outputs=["final_answer"],
+        ),
+        "universal-primary-run",
+    )
+
+    assert model.stages[0] == "universal_primary"
+    assert state.primary_persisted is True
+    assert state.primary_result is not None
+    assert state.report is not None
+    assert state.report.primary_result == state.primary_result
+
+
+@pytest.mark.asyncio
+async def test_missing_required_capability_stops_before_model_call(tmp_path: Path) -> None:
+    runtime, _, model = build_runtime(tmp_path)
+
+    state = await runtime.run_inline(
+        TaskRequest(
+            objective="Exploit this pwn binary and return the flag",
+            expected_outputs=["final_answer"],
+        ),
+        "missing-pwn-capability",
+    )
+
+    assert model.stages == []
+    assert state.status == RunStatus.PARTIAL
+    assert state.capability_plan is not None
+    assert state.capability_plan.status == CapabilityStatus.UNAVAILABLE
+    assert state.primary_result is not None
+    assert state.primary_result.status == UnitOutcomeStatus.CAPABILITY_UNAVAILABLE
+    assert state.report is not None
+    assert state.report.executive_summary == state.primary_result.executive_summary
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_is_isolated_and_preserves_primary_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(expected_outputs=["final_answer"]), "tool-exception")
+    state.workspace = str(tmp_path)
+    state.scenario = Scenario.CODE_AUDIT
+    state.classification_completed = True
+    state.capability_plan = CapabilityPlan(
+        task_kind="code_audit",
+        languages=["python"],
+        status=CapabilityStatus.READY,
+    )
+    state.primary_result = UniversalPrimaryResult(
+        status=UnitOutcomeStatus.SUCCESS,
+        final_answer="primary-answer",
+        executive_summary="Primary answer exists before tools run.",
+        confidence=0.6,
+    )
+    state.primary_persisted = True
+    state.final_answer = "primary-answer"
+    state.plan = [
+        PlanStep(
+            step_id="audit-python-bandit",
+            objective="Run isolated tool",
+            agent_role="executor",
+            tool_candidates=["bandit_python_audit"],
+            inputs={"target": "."},
+        )
+    ]
+    state.active_step_id = "audit-python-bandit"
+    runtime.ledger.save_state(state)
+
+    async def explode(*_args: Any, **_kwargs: Any) -> RuntimeToolResult:
+        raise RuntimeError("isolated tool crash")
+
+    monkeypatch.setattr(runtime.broker, "invoke", explode)
+    updated = await runtime.node_execute(state)
+
+    assert updated.final_answer == "primary-answer"
+    assert updated.observations[-1].status == ToolStatus.ERROR
+    assert updated.receipts[-1].unit_type == "tool"
+    assert updated.receipts[-1].status == UnitOutcomeStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_missing_workspace_chunk_has_independent_receipt(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "missing-workspace-chunk")
+    state.workspace = str(tmp_path)
+    state.capability_plan = CapabilityPlan(
+        task_kind="code_audit",
+        languages=["python"],
+        status=CapabilityStatus.READY,
+    )
+    state.input_artifacts = [
+        InputArtifact(
+            original_name="missing.py",
+            relative_path="missing.py",
+            sha256="0" * 64,
+            size_bytes=10,
+            media_type="text/x-python",
+        )
+    ]
+    runtime.ledger.save_state(state)
+
+    updated = await runtime.node_universal_primary(state)
+
+    receipt = next(item for item in updated.receipts if item.unit_id == "missing.py")
+    assert receipt.unit_type == "workspace_chunk"
+    assert receipt.status == UnitOutcomeStatus.FAILED
+    assert updated.primary_persisted is True

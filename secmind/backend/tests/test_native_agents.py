@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
-from typing import Any
+from typing import Any, TypedDict
 
+import ormsgpack
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from agents.actions import AgentActionError, AgentActionType, parse_agent_action
 from agents.dispatcher import AgentDispatcher
 from agents.native import StaticPromptResolver
 from agents.registry import ROLE_DESCRIPTORS, build_native_agent_registry
+from agents.subgraph import AgentGraphState
 from app.schemas.agents import AgentMessageKind, AgentRole, AgentStatus, AgentTask
 from app.schemas.runtime import EventContext
 from app.schemas.tools import (
@@ -20,6 +24,11 @@ from app.schemas.tools import (
     UnifiedToolResult,
 )
 from llm.base import LLMMessage, LLMProvider, LLMResponse
+
+
+class ParentGraphState(TypedDict, total=False):
+    objective: str
+    result: dict[str, Any]
 
 
 def action(action_type: str, **values: Any) -> str:
@@ -130,9 +139,7 @@ class EventRecorder:
 
 def test_action_parser_accepts_fenced_json_and_rejects_prose() -> None:
     parsed = parse_agent_action(
-        "```json\n"
-        + action("delegate", role="coder", objective="Create a scanner")
-        + "\n```"
+        "```json\n" + action("delegate", role="coder", objective="Create a scanner") + "\n```"
     )
 
     assert parsed.action == AgentActionType.DELEGATE
@@ -153,6 +160,56 @@ def test_registry_contains_every_frozen_native_role() -> None:
         "execute_agent",
         "__end__",
     }
+
+
+def test_native_agent_subgraph_checkpoint_state_is_msgpack_serializable() -> None:
+    assert set(AgentGraphState.__annotations__) == {"context_id", "result"}
+    state: AgentGraphState = {
+        "context_id": "agent-1",
+        "result": {
+            "agent_instance_id": "agent-1",
+            "task_id": "task-1",
+            "status": "completed",
+            "summary": "done",
+        },
+    }
+
+    assert ormsgpack.unpackb(ormsgpack.packb(state)) == state
+
+
+@pytest.mark.asyncio
+async def test_parent_checkpoint_never_serializes_native_agent_runtime_context() -> None:
+    model = ScriptedModel(
+        {AgentRole.REPORTER: [action("complete", summary="Checkpoint-safe report completed")]}
+    )
+    dispatcher = AgentDispatcher(
+        registry=build_native_agent_registry(model=model, prompts=StaticPromptResolver())
+    )
+
+    async def execute_agent(state: ParentGraphState) -> ParentGraphState:
+        result = await dispatcher.dispatch_root(
+            AgentRole.REPORTER,
+            AgentTask(
+                run_id="run-checkpoint",
+                flow_id="flow-checkpoint",
+                objective=state["objective"],
+            ),
+        )
+        return {"result": result.model_dump(mode="json")}
+
+    builder = StateGraph(ParentGraphState)
+    builder.add_node("execute_agent", execute_agent)
+    builder.add_edge(START, "execute_agent")
+    builder.add_edge("execute_agent", END)
+    graph = builder.compile(checkpointer=MemorySaver())
+
+    state = await graph.ainvoke(
+        {"objective": "Generate a report"},
+        {"configurable": {"thread_id": "checkpoint-native-agent"}},
+    )
+
+    assert state["result"]["status"] == AgentStatus.COMPLETED.value
+    assert state["result"]["summary"] == "Checkpoint-safe report completed"
 
 
 @pytest.mark.asyncio
@@ -357,9 +414,7 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
     chains = await dispatcher.chain_store.list_for_run("run-parity")
     assert len(chains) == 4
     assert len({item.chain_id for item in chains}) == 4
-    assert {item.agent_instance_id for item in chains} == {
-        item.instance_id for item in instances
-    }
+    assert {item.agent_instance_id for item in chains} == {item.instance_id for item in instances}
 
     assert len(gateway.invocations) == 1
     assert gateway.invocations[0].tool_id == "native:code_scan"
@@ -388,12 +443,8 @@ async def test_pentagi_task_lifecycle_role_order_is_preserved() -> None:
             AgentRole.CODER: [
                 action("complete", summary="Source inspected", evidence_ids=["evidence-1"])
             ],
-            AgentRole.REFINER: [
-                action("complete", summary="Remaining plan is valid")
-            ],
-            AgentRole.REPORTER: [
-                action("complete", summary="Final report generated")
-            ],
+            AgentRole.REFINER: [action("complete", summary="Remaining plan is valid")],
+            AgentRole.REPORTER: [action("complete", summary="Final report generated")],
         }
     )
     registry = build_native_agent_registry(model=model, prompts=StaticPromptResolver())

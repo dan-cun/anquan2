@@ -393,6 +393,11 @@ class NativeCollaborationService:
         return resolved_run_id, result
 
     def collect_run_products(self, run_id: str, result: AgentResult) -> dict[str, Any]:
+        agent_results = [
+            item.model_dump(mode="json")
+            for instance in self.dispatcher.instances(run_id)
+            if (item := self.dispatcher.result(instance.instance_id)) is not None
+        ]
         artifacts = [
             {
                 "artifact_id": row.artifact_id,
@@ -466,6 +471,7 @@ class NativeCollaborationService:
         ]
         return {
             "agent_result": result.model_dump(mode="json"),
+            "agent_results": agent_results,
             "artifacts": artifacts,
             "evidence": evidence,
             "findings": findings,

@@ -34,6 +34,8 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
             model=settings.llm_model,
             timeout_seconds=settings.llm_timeout_seconds,
             temperature=settings.llm_temperature,
+            thinking_enabled=settings.llm_thinking_enabled,
+            reasoning_effort=settings.llm_reasoning_effort,
         )
 
     return NullLLMProvider(f"Unsupported LLM provider: {provider}")

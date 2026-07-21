@@ -9,7 +9,7 @@
       "status": "candidate",
       "source": "backend/pkg/templates/prompts/primary_agent.tmpl",
       "sourceSha256": "f000f4706042efb07663c07cc5ff8943eed498c62b012911277d9a5a5521e2dc",
-      "candidateSha256": "2f760558a918217c113884009efb38f2b588588da3b726648887e93220f76542",
+      "candidateSha256": "7be2bf58f0b480ce00ff6de98a5a366a1b882dde6fd7262a21e740e68a913fb8",
       "sourceGoTemplateTokens": [
         "{{.AdviceToolName}}",
         "{{.AdviceToolName}}",
@@ -126,7 +126,7 @@
       "status": "candidate",
       "source": "backend/pkg/templates/prompts/generator.tmpl",
       "sourceSha256": "749f034b31ca5774a381ee62152eed9ca18ef5697a2388d0aa86563dd77af034",
-      "candidateSha256": "9fb45d331ba40922f84ef06ecf5194dfd781d22f6965a136fd4e3dfc82382fbb",
+      "candidateSha256": "79303668ee05907d7af02e8777af737d192c53bbf39398f5f3f09dbd50676f6b",
       "sourceGoTemplateTokens": [
         "{{.BrowserToolName}}",
         "{{.BrowserToolName}}",
@@ -211,7 +211,7 @@
       "status": "candidate",
       "source": "backend/pkg/templates/prompts/reporter.tmpl",
       "sourceSha256": "e0946fca2b89cc027147565aaa6f055417f05628cd68fcdcabcf996aa55543e5",
-      "candidateSha256": "e9da15accca58329dc3f4614b5a3234692d842a7e33d3e72b398da6f6e297e77",
+      "candidateSha256": "a997cc2d1018d0c3c5181afa3964f491c8d817035e4ff10e90cbae2018566d32",
       "sourceGoTemplateTokens": [
         "{{.Cwd}}",
         "{{.Cwd}}",
@@ -280,7 +280,7 @@
       "status": "candidate",
       "source": "backend/pkg/templates/prompts/language_chooser.tmpl",
       "sourceSha256": "a53d6b9e2a81d1880a6dfb7a70b1b137f3795d6c5c382b1cffec7a667dd9377c",
-      "candidateSha256": "126bed0fd63c80a20216f41e8b51335972a24e648be3b26373ed53a97b948999",
+      "candidateSha256": "4399b38e78be93ba4d0b3478050bef7b80bc2e68c313a7e963473193c0dfadef",
       "sourceGoTemplateTokens": [
         "{{.Input}}"
       ],
@@ -305,7 +305,7 @@
       "status": "candidate",
       "source": "backend/pkg/templates/graphiti/agent_response.tmpl",
       "sourceSha256": "a6d9abf37c11c54c08cf4b27913ef98d04471942db216dc9786e067bc56ba458",
-      "candidateSha256": "700902e35aa4ce372e9358685638a8c1c6ae086ccfca24a3dd819e2fc8794149",
+      "candidateSha256": "1df85739236abd5502e2982a5bd96a30e8e589c26ae5f534e35a892d2caafb33",
       "sourceGoTemplateTokens": [
         "{{.AgentType}}",
         "{{.Response}}",

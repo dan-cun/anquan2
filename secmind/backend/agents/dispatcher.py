@@ -74,10 +74,13 @@ class AgentDispatcher:
         self.registry = registry
         self.publisher = publisher or _noop_publisher
         publisher_parameters = inspect.signature(self.publisher).parameters.values()
-        self._publisher_accepts_context = any(
-            item.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
-            for item in publisher_parameters
-        ) or len(inspect.signature(self.publisher).parameters) >= 4
+        self._publisher_accepts_context = (
+            any(
+                item.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+                for item in publisher_parameters
+            )
+            or len(inspect.signature(self.publisher).parameters) >= 4
+        )
         self.tool_gateway = tool_gateway
         self.chain_store = chain_store or InMemoryMessageChainStore()
         self.max_parallel = max_parallel
@@ -442,7 +445,12 @@ class AgentDispatcher:
             definitions = getattr(self.tool_gateway, "definitions", None)
             if not callable(definitions):
                 return []
-            return visible_tool_definitions(descriptor, definitions())
+            visible = visible_tool_definitions(descriptor, definitions())
+            configured = task.metadata.get("allowed_tool_ids")
+            if not isinstance(configured, list):
+                return visible
+            allowed = {str(item) for item in configured}
+            return [item for item in visible if item.tool_id in allowed]
 
         async def invoke_tool(tool_id: str, arguments: dict[str, Any]) -> UnifiedToolResult:
             invocation = UnifiedToolInvocation(
@@ -582,8 +590,7 @@ class AgentDispatcher:
 
         terminal_status = (
             result.status
-            if result.status
-            in {AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.CANCELLED}
+            if result.status in {AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.CANCELLED}
             else AgentStatus.FAILED
         )
         instance.status = terminal_status
@@ -648,9 +655,7 @@ class AgentDispatcher:
             delegation.model_dump(mode="json"),
             kind=DecisionKind.DELEGATE,
             decision=f"delegate_to:{role.value}",
-            rationale_summary=(
-                f"将独立子任务委派给 {role.value}，目标为：{task.objective}"
-            ),
+            rationale_summary=(f"将独立子任务委派给 {role.value}，目标为：{task.objective}"),
             correlation_id=delegation.delegation_id,
         )
         if ready is not None and not ready.done():

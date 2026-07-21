@@ -19,7 +19,13 @@ from app.schemas.agents import (
 from app.schemas.tools import UnifiedToolDefinition, UnifiedToolInvocation, UnifiedToolResult
 from llm.base import LLMMessage, LLMProvider
 
-from .actions import ACTION_PROTOCOL, AgentActionError, AgentActionType, parse_agent_action
+from .actions import (
+    ACTION_PROTOCOL,
+    AgentAction,
+    AgentActionError,
+    AgentActionType,
+    parse_agent_action,
+)
 from .chains import AgentMessageChain
 from .loop_guard import AgentLoopGuard, LoopGuardConfig
 from .tool_catalog import render_tool_catalog
@@ -42,9 +48,7 @@ class ToolGateway(Protocol):
 DelegateCallback = Callable[[AgentRole, AgentTask], Awaitable[AgentResult]]
 ToolCallback = Callable[[str, dict[str, Any]], Awaitable[UnifiedToolResult]]
 ToolCatalogCallback = Callable[[], list[UnifiedToolDefinition]]
-MessageCallback = Callable[
-    [str, str, AgentMessageKind, dict[str, Any]], Awaitable[AgentMessage]
-]
+MessageCallback = Callable[[str, str, AgentMessageKind, dict[str, Any]], Awaitable[AgentMessage]]
 WaitMessageCallback = Callable[[str, float | None], Awaitable[AgentMessage | None]]
 StopRequestedCallback = Callable[[], bool]
 RuntimeEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -271,6 +275,8 @@ class ModelNativeAgent(NativeAgent):
                 agent_instance_id=context.instance.instance_id,
                 task_id=context.task.task_id,
                 iteration=iteration,
+                response_schema=AgentAction.model_json_schema(),
+                json_mode=True,
             )
             context.chain.append(
                 "assistant",
@@ -381,9 +387,7 @@ class ModelNativeAgent(NativeAgent):
                         return self._failed(
                             context,
                             code="AGENT_LOOP_DETECTED",
-                            message=(
-                                "Agent ignored repeated loop-guard strategy-change requests"
-                            ),
+                            message=("Agent ignored repeated loop-guard strategy-change requests"),
                         )
                 continue
 

@@ -7,6 +7,7 @@ from llm.base import LLMProvider
 
 from .loop_guard import LoopGuardConfig
 from .native import ModelNativeAgent, NativeAgent, PromptResolver
+from .runtime_dependencies import AgentRuntimeDependencies
 from .subgraph import NativeAgentSubgraph
 
 AgentBuilder = Callable[[AgentDescriptor], NativeAgent]
@@ -134,6 +135,7 @@ class NativeAgentRegistry:
         self._descriptors: dict[AgentRole, AgentDescriptor] = {}
         self._builders: dict[AgentRole, AgentBuilder] = {}
         self._subgraphs: dict[AgentRole, NativeAgentSubgraph] = {}
+        self.runtime_dependencies = AgentRuntimeDependencies()
 
     def register(self, descriptor: AgentDescriptor, builder: AgentBuilder) -> None:
         if descriptor.role in self._descriptors:
@@ -158,7 +160,10 @@ class NativeAgentRegistry:
 
     def subgraph(self, role: AgentRole) -> NativeAgentSubgraph:
         if role not in self._subgraphs:
-            self._subgraphs[role] = NativeAgentSubgraph(self.create(role))
+            self._subgraphs[role] = NativeAgentSubgraph(
+                self.create(role),
+                self.runtime_dependencies,
+            )
         return self._subgraphs[role]
 
 
@@ -185,4 +190,3 @@ def build_native_agent_registry(
     for descriptor in ROLE_DESCRIPTORS:
         registry.register(descriptor, build)
     return registry
-
