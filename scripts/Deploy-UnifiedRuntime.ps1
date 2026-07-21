@@ -55,7 +55,7 @@ try {
         throw "Cannot resolve immutable image ID for $imageRef"
     }
 
-    $contract = Get-Content -Raw $contractPath | ConvertFrom-Json
+    $contract = Get-Content -Raw -Encoding UTF8 $contractPath | ConvertFrom-Json
     $versions = [ordered]@{}
     foreach ($property in $contract.version_sources.PSObject.Properties) {
         $source = $property.Value
@@ -70,7 +70,7 @@ try {
         }
         if ($property.Name -eq "model") {
             $rawPublicConfig = @{}
-            foreach ($line in Get-Content -LiteralPath $sourcePath) {
+            foreach ($line in Get-Content -LiteralPath $sourcePath -Encoding UTF8) {
                 $trimmed = $line.Trim()
                 if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
                 $parts = $trimmed.Split("=", 2)
