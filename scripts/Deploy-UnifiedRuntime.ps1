@@ -87,6 +87,13 @@ try {
             $entry.config = $publicConfig
             $canonicalConfig = ($publicConfig | ConvertTo-Json -Compress)
             $entry.config_sha256 = Get-StringSha256 $canonicalConfig
+            $entry.sha256 = $entry.config_sha256
+        }
+        elseif ($property.Name -eq "mcp") {
+            $mcpConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $sourcePath |
+                ConvertFrom-Json
+            $canonicalMcpConfig = $mcpConfig | ConvertTo-Json -Compress -Depth 20
+            $entry.sha256 = Get-StringSha256 $canonicalMcpConfig
         }
         $versions[$property.Name] = $entry
     }

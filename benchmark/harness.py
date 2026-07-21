@@ -86,6 +86,15 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def ordered_json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def load_runtime_contract(repo_root: Path) -> dict[str, Any]:
     path = repo_root / "config" / "runtime-contract.json"
     try:
@@ -126,8 +135,16 @@ def local_version_summaries(repo_root: Path, contract: dict[str, Any]) -> dict[s
         }
         if name == "model":
             public_values = _public_env_values(path)
+            public_hash = canonical_sha256(public_values)
             summary["config"] = public_values
-            summary["config_sha256"] = canonical_sha256(public_values)
+            summary["sha256"] = public_hash
+            summary["config_sha256"] = public_hash
+        elif name == "mcp":
+            try:
+                mcp_config = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise BenchmarkError(f"Invalid MCP version source {relative_path}: {exc}") from exc
+            summary["sha256"] = ordered_json_sha256(mcp_config)
         summaries[str(name)] = summary
     return summaries
 

@@ -16,6 +16,7 @@ from benchmark.harness import (
     _validate_upload_ref,
     canonical_sha256,
     local_version_summaries,
+    ordered_json_sha256,
     render_evaluation_markdown,
     render_report_file,
     runtime_contract_checks,
@@ -92,10 +93,15 @@ def test_version_summaries_exclude_secrets_and_hash_public_config(tmp_path: Path
         "SECMIND_LLM_MODEL=worker\nSECMIND_LLM_PROVIDER=test\n",
         encoding="utf-8",
     )
+    (tmp_path / "config" / "mcp.json").write_text(
+        '{\n  "servers": [{"server_id": "local"}]\n}\n',
+        encoding="utf-8",
+    )
     contract = {
         "version_sources": {
             "prompt": {"version": "p1", "path": "prompt.xlsx"},
             "model": {"version": "m1", "path": "config/model.env"},
+            "mcp": {"version": "t1", "path": "config/mcp.json"},
         }
     }
 
@@ -106,7 +112,11 @@ def test_version_summaries_exclude_secrets_and_hash_public_config(tmp_path: Path
         "SECMIND_LLM_PROVIDER": "test",
     }
     assert summaries["model"]["config"] == expected_config
+    assert summaries["model"]["sha256"] == canonical_sha256(expected_config)
     assert summaries["model"]["config_sha256"] == canonical_sha256(expected_config)
+    assert summaries["mcp"]["sha256"] == ordered_json_sha256(
+        {"servers": [{"server_id": "local"}]}
+    )
 
     (tmp_path / "config" / "model.env").write_text(
         "SECMIND_LLM_API_KEY=must-not-be-public\n",
