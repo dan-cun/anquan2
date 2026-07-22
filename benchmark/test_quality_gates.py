@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import json
+from pathlib import Path
 
-from benchmark.quality_gates import _case_acceptance
+import pytest
+
+from benchmark.harness import BenchmarkError
+from benchmark.quality_gates import _case_acceptance, run_quality_gates
 
 
 def write_ledger(tmp_path, events):
@@ -144,3 +149,80 @@ def test_serialization_error_in_ledger_fails_case_acceptance(tmp_path) -> None:
     assert accepted["passed"] is False
     assert accepted["serialization_error_count"] == 1
     assert accepted["checks"]["zero_serialization_errors"] is False
+
+
+def quality_gate_args(tmp_path: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        repo_root=tmp_path,
+        state_dir=tmp_path / "state",
+        base_url="http://127.0.0.1:18100",
+        container="benchmark",
+        static_case="BB-01",
+        dynamic_case="CY-WEB-01",
+        selection=tmp_path / "selection.json",
+        timeout_seconds=30,
+        stop_after_two=False,
+    )
+
+
+def test_two_case_failure_never_starts_twelve_cases(tmp_path, monkeypatch) -> None:
+    call_order: list[str] = []
+    acceptances = iter((True, False))
+
+    monkeypatch.setattr(
+        "benchmark.quality_gates.api_preflight",
+        lambda *_args: {"ready_for_static_smoke": True},
+    )
+    monkeypatch.setattr(
+        "benchmark.quality_gates._docker_gate",
+        lambda *_args: {"passed": True},
+    )
+
+    def run_case(**kwargs):
+        call_order.append(str(kwargs["case_id"]))
+        passed = next(acceptances)
+        return {}, {"passed": passed}
+
+    def run_twelve(**_kwargs):
+        call_order.append("twelve")
+        return {}, []
+
+    monkeypatch.setattr("benchmark.quality_gates._run_exported_case", run_case)
+    monkeypatch.setattr("benchmark.quality_gates._run_twelve_case_gate", run_twelve)
+
+    with pytest.raises(BenchmarkError, match="two-case"):
+        run_quality_gates(quality_gate_args(tmp_path))
+
+    assert call_order == ["BB-01", "CY-WEB-01"]
+
+
+def test_twelve_cases_start_only_after_both_two_case_acceptances_pass(
+    tmp_path, monkeypatch
+) -> None:
+    call_order: list[str] = []
+
+    monkeypatch.setattr(
+        "benchmark.quality_gates.api_preflight",
+        lambda *_args: {"ready_for_static_smoke": True},
+    )
+    monkeypatch.setattr(
+        "benchmark.quality_gates._docker_gate",
+        lambda *_args: {"passed": True},
+    )
+
+    def run_case(**kwargs):
+        call_order.append(str(kwargs["case_id"]))
+        return {}, {"passed": True}
+
+    def run_twelve(**_kwargs):
+        call_order.append("twelve")
+        acceptance = [{"passed": True} for _ in range(12)]
+        return {"experiment_id": "baseline-test"}, acceptance
+
+    monkeypatch.setattr("benchmark.quality_gates._run_exported_case", run_case)
+    monkeypatch.setattr("benchmark.quality_gates._run_twelve_case_gate", run_twelve)
+
+    result = run_quality_gates(quality_gate_args(tmp_path))
+
+    assert result["passed"] is True
+    assert call_order == ["BB-01", "CY-WEB-01", "twelve"]

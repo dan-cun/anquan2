@@ -12,7 +12,7 @@ from benchmark.harness import (
     api_preflight,
     atomic_write_json,
     default_state_dir,
-    run_baseline_selection,
+    load_active_dataset,
     run_smoke,
     utc_stamp,
 )
@@ -21,9 +21,18 @@ TERMINAL_STATUSES = {"completed", "partial", "denied", "failed"}
 CAPABILITY_UNAVAILABLE_STATUS = "capability_unavailable"
 
 
-def _docker_gate(container: str, command: str) -> dict[str, Any]:
+def _docker_gate(container: str, command: str, *arguments: str) -> dict[str, Any]:
     completed = subprocess.run(
-        ["docker", "exec", container, "python", "-m", "benchmark_gates", command],
+        [
+            "docker",
+            "exec",
+            container,
+            "python",
+            "-m",
+            "benchmark_gates",
+            command,
+            *arguments,
+        ],
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -40,6 +49,26 @@ def _docker_gate(container: str, command: str) -> dict[str, Any]:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise BenchmarkError(f"In-image {command} gate did not return JSON") from error
+
+
+def _cleanup_benchmark_run(
+    *,
+    container: str,
+    base_url: str,
+    run_id: str,
+    receipt_path: Path,
+) -> dict[str, Any]:
+    cleanup = _docker_gate(container, "cleanup", "--run-id", run_id)
+    import httpx
+
+    with httpx.Client(base_url=base_url.rstrip("/"), timeout=10.0) as client:
+        response = client.get(f"/api/v1/runs/{run_id}")
+    cleanup["api_returns_404"] = response.status_code == 404
+    cleanup["passed"] = bool(cleanup.get("passed")) and cleanup["api_returns_404"]
+    atomic_write_json(receipt_path, cleanup)
+    if not cleanup["passed"]:
+        raise BenchmarkError(f"Benchmark SQLite cleanup failed for run {run_id}")
+    return cleanup
 
 
 def _ledger_health(path: Path) -> dict[str, int | bool]:
@@ -119,6 +148,107 @@ def _case_acceptance(result: dict[str, Any], ledger_path: Path) -> dict[str, Any
     }
 
 
+def _run_exported_case(
+    *,
+    case_id: str,
+    baseline: bool,
+    experiment_id: str,
+    args: argparse.Namespace,
+    state_dir: Path,
+    repo_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    result = run_smoke(
+        case_id=case_id,
+        base_url=args.base_url,
+        state_dir=state_dir,
+        repo_root=repo_root,
+        timeout_seconds=args.timeout_seconds,
+        cleanup=False,
+        baseline=baseline,
+        experiment_id=experiment_id,
+    )
+    result_dir = (
+        state_dir / "results" / experiment_id / "round-1" / case_id
+    )
+    acceptance = _case_acceptance(result, result_dir / "ledger.jsonl")
+    cleanup = _cleanup_benchmark_run(
+        container=args.container,
+        base_url=args.base_url,
+        run_id=str(result["run_id"]),
+        receipt_path=result_dir / "cleanup-receipt.json",
+    )
+    acceptance["cleanup"] = cleanup
+    acceptance["checks"]["cleanup_verified"] = bool(cleanup["passed"])
+    acceptance["passed"] = all(acceptance["checks"].values())
+    return result, acceptance
+
+
+def _run_twelve_case_gate(
+    *,
+    args: argparse.Namespace,
+    state_dir: Path,
+    repo_root: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    selection = json.loads(args.selection.resolve().read_text(encoding="utf-8"))
+    active, cases = load_active_dataset(state_dir)
+    case_ids = [str(item["case_id"]) for item in selection.get("cases", [])]
+    if len(case_ids) != 12 or len(set(case_ids)) != 12:
+        raise BenchmarkError("Baseline selection must contain exactly 12 unique cases")
+    known_ids = {str(item["case_id"]) for item in cases}
+    missing = sorted(set(case_ids) - known_ids)
+    if missing:
+        raise BenchmarkError(f"Baseline selection contains unknown cases: {', '.join(missing)}")
+    if selection.get("dataset_sha256") != active["archive_sha256"]:
+        raise BenchmarkError("Baseline selection does not match the active dataset")
+
+    experiment_id = f"baseline-{selection['selection_id']}-{utc_stamp()}"
+    batch_root = state_dir / "results" / experiment_id
+    summary_path = batch_root / "batch-summary.json"
+    batch: dict[str, Any] = {
+        "schema_version": "1.0",
+        "experiment_id": experiment_id,
+        "selection_id": selection["selection_id"],
+        "dataset_sha256": active["archive_sha256"],
+        "case_count": 12,
+        "completed_count": 0,
+        "results": [],
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    atomic_write_json(summary_path, batch)
+    acceptance: list[dict[str, Any]] = []
+    for position, case_id in enumerate(case_ids, start=1):
+        result, accepted = _run_exported_case(
+            case_id=case_id,
+            baseline=True,
+            experiment_id=experiment_id,
+            args=args,
+            state_dir=state_dir,
+            repo_root=repo_root,
+        )
+        acceptance.append(accepted)
+        entry = {
+            "position": position,
+            "case_id": case_id,
+            "run_id": result["run_id"],
+            "status": result["status"],
+            "passed": accepted["passed"],
+            "result_path": str(batch_root / "round-1" / case_id / "result.json"),
+            "cleanup_verified": accepted["checks"]["cleanup_verified"],
+        }
+        batch["results"].append(entry)
+        batch["completed_count"] = position
+        atomic_write_json(summary_path, batch)
+        if not accepted["passed"]:
+            batch["stopped_at_case"] = case_id
+            batch["finished_at"] = datetime.now(UTC).isoformat()
+            atomic_write_json(summary_path, batch)
+            raise BenchmarkError(f"12-case acceptance stopped at {case_id}")
+    batch["finished_at"] = datetime.now(UTC).isoformat()
+    batch["passed"] = True
+    atomic_write_json(summary_path, batch)
+    return batch, acceptance
+
+
 def run_quality_gates(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = args.repo_root.resolve()
     state_dir = (args.state_dir or default_state_dir(repo_root)).resolve()
@@ -141,25 +271,15 @@ def run_quality_gates(args: argparse.Namespace) -> dict[str, Any]:
         (args.static_case, False),
         (args.dynamic_case, True),
     ):
-        result = run_smoke(
+        _, accepted = _run_exported_case(
             case_id=case_id,
-            base_url=args.base_url,
-            state_dir=state_dir,
-            repo_root=repo_root,
-            timeout_seconds=args.timeout_seconds,
-            cleanup=True,
             baseline=baseline,
             experiment_id=experiment_id,
+            args=args,
+            state_dir=state_dir,
+            repo_root=repo_root,
         )
-        ledger_path = (
-            state_dir
-            / "results"
-            / experiment_id
-            / "round-1"
-            / case_id
-            / "ledger.jsonl"
-        )
-        case_results.append(_case_acceptance(result, ledger_path))
+        case_results.append(accepted)
     two_case_passed = all(item["passed"] for item in case_results)
     atomic_write_json(gate_root / "two-case.json", case_results)
     if not two_case_passed:
@@ -168,19 +288,11 @@ def run_quality_gates(args: argparse.Namespace) -> dict[str, Any]:
     baseline_result: dict[str, Any] | None = None
     baseline_acceptance: list[dict[str, Any]] = []
     if not args.stop_after_two:
-        baseline_result = run_baseline_selection(
-            selection_path=args.selection,
-            base_url=args.base_url,
+        baseline_result, baseline_acceptance = _run_twelve_case_gate(
+            args=args,
             state_dir=state_dir,
             repo_root=repo_root,
-            timeout_seconds=args.timeout_seconds,
         )
-        for item in baseline_result["results"]:
-            result_path = Path(str(item["result_path"]))
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-            baseline_acceptance.append(
-                _case_acceptance(result, result_path.with_name("ledger.jsonl"))
-            )
         atomic_write_json(gate_root / "twelve-case.json", baseline_acceptance)
         if len(baseline_acceptance) != 12 or not all(
             item["passed"] for item in baseline_acceptance
