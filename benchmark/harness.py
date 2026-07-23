@@ -41,6 +41,32 @@ UPLOAD_REF_RE = re.compile(
 SECRET_RE = re.compile(
     r"(?i)(?:bearer\s+[a-z0-9._~+/=-]{8,}|(?:api[_-]?key|secret)\s*[:=]\s*[\"']?[a-z0-9._~+/=-]{16,})"
 )
+RUN_SCOPED_TABLES = (
+    "context_snapshots",
+    "task_notes",
+    "task_todos",
+    "skill_loads",
+    "llm_usage",
+    "llm_calls",
+    "tool_calls",
+    "approvals",
+    "reports",
+    "findings",
+    "evidence",
+    "artifacts",
+    "agent_messages",
+    "agent_delegations",
+    "message_chains",
+    "agent_instances",
+    "projection_approvals",
+    "projection_findings",
+    "projection_llm_usage",
+    "projection_offsets",
+    "projection_steps",
+    "projection_runs",
+    "runtime_ledger_events",
+    "runtime_runs",
+)
 
 
 class BenchmarkError(RuntimeError):
@@ -652,33 +678,7 @@ def _validate_upload_ref(upload_ref: str) -> None:
 def _cleanup_sql(run_id: str) -> str:
     if not UUID_RE.fullmatch(run_id):
         raise BenchmarkError("Cleanup requires a canonical UUID run_id")
-    run_tables = [
-        "context_snapshots",
-        "task_notes",
-        "task_todos",
-        "skill_loads",
-        "llm_usage",
-        "llm_calls",
-        "tool_calls",
-        "approvals",
-        "reports",
-        "findings",
-        "evidence",
-        "artifacts",
-        "agent_messages",
-        "agent_delegations",
-        "message_chains",
-        "agent_instances",
-        "projection_approvals",
-        "projection_findings",
-        "projection_llm_usage",
-        "projection_offsets",
-        "projection_steps",
-        "projection_runs",
-        "runtime_ledger_events",
-        "runtime_runs",
-    ]
-    tables_literal = ",".join(f"'{table}'" for table in run_tables)
+    tables_literal = ",".join(f"'{table}'" for table in RUN_SCOPED_TABLES)
     return f"""
 BEGIN;
 DO $cleanup$
@@ -725,6 +725,85 @@ COMMIT;
 """
 
 
+def _benchmark_cleanup_script() -> str:
+    tables_json = json.dumps(RUN_SCOPED_TABLES)
+    return (
+        """
+import json
+import shutil
+import sqlite3
+import sys
+from pathlib import Path
+
+run_id, upload_ref = sys.argv[1], sys.argv[2]
+tables = json.loads('@@TABLES@@')
+database = Path('/app/data/benchmark.db')
+connection = sqlite3.connect(database)
+
+def has_table(name):
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+def quoted(name):
+    return '"' + name.replace('"', '""') + '"'
+
+try:
+    connection.execute('PRAGMA foreign_keys = ON')
+    connection.execute('BEGIN IMMEDIATE')
+    if has_table('message_entries') and has_table('message_chains'):
+        connection.execute(
+            'DELETE FROM message_entries WHERE chain_id IN '
+            '(SELECT chain_id FROM message_chains WHERE run_id = ?)',
+            (run_id,),
+        )
+    for table in tables:
+        if has_table(table):
+            connection.execute(
+                'DELETE FROM %s WHERE run_id = ?' % quoted(table),
+                (run_id,),
+            )
+    for table in ('checkpoint_writes', 'checkpoint_blobs', 'checkpoints'):
+        if has_table(table):
+            connection.execute(
+                'DELETE FROM %s WHERE thread_id = ?' % quoted(table),
+                (run_id,),
+            )
+    for table in tables:
+        if has_table(table):
+            remaining = connection.execute(
+                'SELECT 1 FROM %s WHERE run_id = ? LIMIT 1' % quoted(table),
+                (run_id,),
+            ).fetchone()
+            if remaining is not None:
+                raise RuntimeError('cleanup left records in %s' % table)
+    connection.commit()
+except Exception:
+    connection.rollback()
+    raise
+finally:
+    connection.close()
+
+for root_text, name, recursive in (
+    ('/app/data/runs', run_id, True),
+    ('/app/data/uploads', upload_ref, False),
+):
+    root = Path(root_text).resolve()
+    target = (root / name).resolve()
+    if target.parent != root:
+        raise SystemExit('unsafe cleanup target: %s' % target)
+    if recursive:
+        if target.exists():
+            shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+""".strip()
+        .replace("@@TABLES@@", tables_json)
+    )
+
+
 def cleanup_run(
     *,
     run_id: str,
@@ -736,24 +815,48 @@ def cleanup_run(
     if not UUID_RE.fullmatch(run_id):
         raise BenchmarkError("Refusing cleanup for a non-UUID run_id")
     _validate_upload_ref(upload_ref)
-    _run_command(
-        [
-            "docker",
-            "compose",
-            "exec",
-            "-T",
-            "postgres",
-            "psql",
-            "-U",
-            "secmind",
-            "-d",
-            "secmind",
-            "-v",
-            "ON_ERROR_STOP=1",
-        ],
-        cwd=repo_root,
-        input_text=_cleanup_sql(run_id),
-    )
+    with httpx.Client(base_url=base_url.rstrip("/"), timeout=10.0) as client:
+        info_response = client.get("/api/v1/info")
+        info_response.raise_for_status()
+        environment = str(info_response.json().get("environment") or "")
+
+    if environment == "benchmark":
+        _run_command(
+            [
+                "docker",
+                "compose",
+                "-f",
+                "compose.benchmark.yaml",
+                "exec",
+                "-T",
+                "backend",
+                "python",
+                "-c",
+                _benchmark_cleanup_script(),
+                run_id,
+                upload_ref,
+            ],
+            cwd=repo_root,
+        )
+    else:
+        _run_command(
+            [
+                "docker",
+                "compose",
+                "exec",
+                "-T",
+                "postgres",
+                "psql",
+                "-U",
+                "secmind",
+                "-d",
+                "secmind",
+                "-v",
+                "ON_ERROR_STOP=1",
+            ],
+            cwd=repo_root,
+            input_text=_cleanup_sql(run_id),
+        )
     filesystem_script = """
 import shutil
 import sys
@@ -774,21 +877,22 @@ for root_text, name, recursive in (
     elif target.exists():
         target.unlink()
 """.strip()
-    _run_command(
-        [
-            "docker",
-            "compose",
-            "exec",
-            "-T",
-            "backend",
-            "python",
-            "-c",
-            filesystem_script,
-            run_id,
-            upload_ref,
-        ],
-        cwd=repo_root,
-    )
+    if environment != "benchmark":
+        _run_command(
+            [
+                "docker",
+                "compose",
+                "exec",
+                "-T",
+                "backend",
+                "python",
+                "-c",
+                filesystem_script,
+                run_id,
+                upload_ref,
+            ],
+            cwd=repo_root,
+        )
     with httpx.Client(base_url=base_url.rstrip("/"), timeout=10.0) as client:
         response = client.get(f"/api/v1/runs/{run_id}")
     if response.status_code != 404:

@@ -7,6 +7,7 @@ import pytest
 
 from benchmark.harness import (
     BenchmarkError,
+    _benchmark_cleanup_script,
     _cleanup_sql,
     _directory_digest,
     _exact_answer_matches,
@@ -80,6 +81,16 @@ def test_cleanup_sql_is_run_scoped_and_preserves_configuration() -> None:
     assert f"WHERE run_id = '{run_id}'" in sql
     for table in ("prompts", "prompt_versions", "mcp_servers", "mcp_capabilities", "skills"):
         assert f"'{table}'" not in sql
+
+
+def test_benchmark_cleanup_targets_isolated_sqlite_and_preserves_configuration() -> None:
+    script = _benchmark_cleanup_script()
+
+    assert "/app/data/benchmark.db" in script
+    assert "runtime_runs" in script
+    assert "checkpoint_writes" in script
+    for table in ("prompts", "prompt_versions", "mcp_servers", "mcp_capabilities", "skills"):
+        assert f'"{table}"' not in script
 
 
 def test_token_usage_accepts_openai_aliases() -> None:
