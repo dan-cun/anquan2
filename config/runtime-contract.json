@@ -9,9 +9,31 @@
     "local-web-security",
     "local-wiremcp"
   ],
+  "expected_mcp_tool_counts": {
+    "local-http-fetch": 1,
+    "local-chrome-devtools": 29,
+    "local-web-security": 10,
+    "local-cyberchef": 3,
+    "local-semgrep": 7,
+    "local-wiremcp": 7,
+    "local-security-extended": 21
+  },
+  "expected_native_tool_ids": [
+    "native:bandit_python_audit",
+    "native:skill.list",
+    "native:skill.load",
+    "native:todo.list",
+    "native:todo.create",
+    "native:todo.update",
+    "native:notes.list",
+    "native:notes.record",
+    "native:context.compress",
+    "native:independent_verify"
+  ],
   "expected_tool_count": 88,
   "expected_native_tool_count": 10,
   "expected_mcp_tool_count": 78,
+  "expected_mcp_tool_definitions_sha256": "5022a0de672481e1cd1329d1370d4964ca594a22ae7452cc08b1a399e2f26d19",
   "reliable_kernel": {
     "state_owner": "runtime_ledger",
     "graph_checkpoint_fields": [

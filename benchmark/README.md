@@ -201,7 +201,17 @@ PostgreSQL data.
 
 Both Compose files load non-secret model settings from `config/model-public.env`, the model key
 from ignored `benchmark/runtime.env`, and mount `config/mcp-servers.json` read-only. The common MCP
-catalog expects Fetch, Chrome DevTools, Web Security, and CyberChef on host ports 9011-9014.
+catalog requires seven servers on host ports 9011-9017: Fetch, Chrome DevTools, Web Security,
+CyberChef, Semgrep, WireMCP, and Security Extended. Their fixed distribution is 78 MCP tools;
+the backend adds 10 native tools for an exact total of 88.
+
+Audit all live capabilities twice, including stable Tool IDs, declared versions, JSON Schemas,
+duplicate detection, connection timeouts, and count drift:
+
+```powershell
+.\venv\Scripts\python.exe scripts\audit_mcp_contract.py `
+  --output benchmark\.state\mcp-contract-audit.json
+```
 
 Preflight validates the exact seven Server IDs, all-connected state, 88 unified tools
 (10 native and 78 MCP), runtime image ID, source commit, clean Git state, and the deployment
