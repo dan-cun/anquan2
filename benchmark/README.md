@@ -140,6 +140,28 @@ the run, pass the returned experiment ID to `evaluate-baseline`. PentAGI never
 receives the private archive; only the evaluator process opens it while
 calculating scores.
 
+### PentAGI DOCX diagnostic report
+
+After `evaluate-baseline` writes `evaluation.json`, generate a decision report
+from the deterministic score and the exported `round-1` records:
+
+```powershell
+python benchmark\pentagi_docx_report.py `
+  --evaluation benchmark\.state\results\<experiment-id>\evaluation.json `
+  --template-docx "C:\path\to\reference-report.docx" `
+  --output benchmark\.state\results\<experiment-id>\PentAGI-跑分诊断报告.docx
+```
+
+The report generator requires `python-docx` and Pillow. In Codex document
+workflows, invoke it with the bundled workspace Python runtime. The generator
+checks the per-case export target and refuses to label unlabeled or non-PentAGI
+data as a PentAGI report. `--preview` exists only for structural testing and
+adds a visible non-PentAGI warning to the cover.
+
+The DOCX includes the fixed-suite score, eight-category view, per-case table,
+runtime/evidence diagnostics, deterministic remediation priorities, and
+provenance. It never reads or exports private answers and cannot change a score.
+
 PentAGI currently cannot prove removal of its residual flow data directory and
 does not provide a hash-chained decision ledger. The adapter records those
 limitations instead of awarding the corresponding cleanup or decision-log
@@ -181,8 +203,8 @@ Both Compose files load non-secret model settings from `config/model-public.env`
 from ignored `benchmark/runtime.env`, and mount `config/mcp-servers.json` read-only. The common MCP
 catalog expects Fetch, Chrome DevTools, Web Security, and CyberChef on host ports 9011-9014.
 
-Preflight validates the exact four Server IDs, all-connected state, 53 unified tools
-(10 native and 43 MCP), runtime image ID, source commit, clean Git state, and the deployment
+Preflight validates the exact seven Server IDs, all-connected state, 88 unified tools
+(10 native and 78 MCP), runtime image ID, source commit, clean Git state, and the deployment
 manifest. It also records SHA-256 summaries for the Prompt workbook, public model profile, MCP
 definition, and live tool definitions. Real benchmark execution defaults to demo mode off; any
 failed provenance check or missing model key blocks the static smoke run.

@@ -19,6 +19,20 @@ def write_ledger(tmp_path, events):
     return path
 
 
+def task_contract(mode: str = "final_answer") -> dict[str, object]:
+    return {
+        "completion_mode": mode,
+        "expected_outputs": ["final_answer"] if mode == "final_answer" else ["findings"],
+        "evaluator": (
+            "final_answer_independent_verification"
+            if mode == "final_answer"
+            else "evidence_backed_findings"
+        ),
+        "required_evidence": ["independent_verification"],
+        "contract_sha256": "a" * 64,
+    }
+
+
 def test_completed_answer_requires_and_accepts_independent_verification(tmp_path) -> None:
     result = {
         "case_id": "case-1",
@@ -29,6 +43,8 @@ def test_completed_answer_requires_and_accepts_independent_verification(tmp_path
             "final_answer": "answer",
             "final_answer_verified": True,
             "completion_mode": "final_answer",
+            "task_contract": task_contract(),
+            "completion_gate_checks": {"evaluator": True, "output:final_answer": True},
             "primary_result": {"status": "success", "final_answer": "answer"},
         },
     }
@@ -47,6 +63,7 @@ def test_partial_capability_unavailable_is_an_explicit_terminal_result(tmp_path)
         "report": {
             "final_answer": None,
             "final_answer_verified": False,
+            "task_contract": task_contract(),
             "primary_result": {"status": "capability_unavailable"},
             "capability_plan": {"status": "capability_unavailable"},
         },
@@ -65,6 +82,7 @@ def test_capability_plan_alone_can_report_explicit_unavailability(tmp_path) -> N
         "ledger_chain_valid": True,
         "report": {
             "final_answer": None,
+            "task_contract": task_contract(),
             "primary_result": {},
             "capability_plan": {"status": "capability_unavailable"},
         },
@@ -86,6 +104,8 @@ def test_unverified_completed_answer_fails_acceptance(tmp_path) -> None:
             "final_answer": "answer",
             "final_answer_verified": False,
             "completion_mode": "final_answer",
+            "task_contract": task_contract(),
+            "completion_gate_checks": {"evaluator": True, "output:final_answer": True},
             "primary_result": {"status": "success", "final_answer": "answer"},
         },
     }
@@ -105,6 +125,7 @@ def test_http_400_in_ledger_fails_case_acceptance(tmp_path) -> None:
         "report": {
             "primary_result": {"status": "capability_unavailable"},
             "capability_plan": {"status": "capability_unavailable"},
+            "task_contract": task_contract(),
         },
     }
     ledger = write_ledger(
@@ -132,6 +153,7 @@ def test_serialization_error_in_ledger_fails_case_acceptance(tmp_path) -> None:
         "report": {
             "primary_result": {"status": "capability_unavailable"},
             "capability_plan": {"status": "capability_unavailable"},
+            "task_contract": task_contract(),
         },
     }
     ledger = write_ledger(
@@ -149,6 +171,31 @@ def test_serialization_error_in_ledger_fails_case_acceptance(tmp_path) -> None:
     assert accepted["passed"] is False
     assert accepted["serialization_error_count"] == 1
     assert accepted["checks"]["zero_serialization_errors"] is False
+
+
+def test_completed_status_fails_when_any_task_contract_check_is_false(tmp_path) -> None:
+    result = {
+        "case_id": "case-false-completion",
+        "run_id": "run-false-completion",
+        "status": "completed",
+        "ledger_chain_valid": True,
+        "report": {
+            "final_answer": "answer",
+            "final_answer_verified": True,
+            "completion_mode": "final_answer",
+            "task_contract": task_contract(),
+            "completion_gate_checks": {
+                "output:final_answer": True,
+                "evidence:independent_verification": False,
+            },
+            "primary_result": {"status": "success", "final_answer": "answer"},
+        },
+    }
+
+    accepted = _case_acceptance(result, write_ledger(tmp_path, []))
+
+    assert accepted["passed"] is False
+    assert accepted["checks"]["completed_satisfies_task_contract"] is False
 
 
 def quality_gate_args(tmp_path: Path) -> argparse.Namespace:

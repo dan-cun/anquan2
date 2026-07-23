@@ -36,6 +36,8 @@ services:
       SECMIND_MCP_CONNECT_TIMEOUT_SECONDS: ${SECMIND_BENCHMARK_MCP_CONNECT_TIMEOUT_SECONDS:-30}
       SECMIND_MCP_CALL_TIMEOUT_SECONDS: ${SECMIND_BENCHMARK_MCP_CALL_TIMEOUT_SECONDS:-300}
       SECMIND_MCP_REFRESH_INTERVAL_SECONDS: ${SECMIND_BENCHMARK_MCP_REFRESH_INTERVAL_SECONDS:-60}
+      SECMIND_TOOL_GUIDE_FILE: /app/tools/tool-agent-guide.json
+      SECMIND_LLM_MAX_ATTEMPTS: ${SECMIND_LLM_MAX_ATTEMPTS:-2}
       SECMIND_SOURCE_COMMIT: ${SECMIND_SOURCE_COMMIT:-unknown}
       SECMIND_IMAGE_DIGEST: ${SECMIND_IMAGE_DIGEST:-unknown}
     ports:
@@ -44,6 +46,7 @@ services:
       - benchmark_data:/app/data
       - ./outputs/019f783d-d94a-7f22-8a31-533c5bdca81e/PentAGI原生Prompt中英对比版.xlsx:/app/config/native-prompts.xlsx:ro
       - ./config/mcp-servers.json:/app/config/mcp-servers.json:ro
+      - ./secmind/backend/tools/tool-agent-guide.json:/app/tools/tool-agent-guide.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     read_only: true

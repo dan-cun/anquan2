@@ -129,11 +129,36 @@ def _case_acceptance(result: dict[str, Any], ledger_path: Path) -> dict[str, Any
             )
         )
     )
+    task_contract = (
+        report.get("task_contract")
+        if isinstance(report.get("task_contract"), dict)
+        else {}
+    )
+    completion_checks = (
+        report.get("completion_gate_checks")
+        if isinstance(report.get("completion_gate_checks"), dict)
+        else {}
+    )
+    contract_generated = all(
+        task_contract.get(key)
+        for key in (
+            "completion_mode",
+            "expected_outputs",
+            "evaluator",
+            "required_evidence",
+            "contract_sha256",
+        )
+    )
+    completed_satisfies_contract = result.get("status") != "completed" or (
+        bool(completion_checks) and all(value is True for value in completion_checks.values())
+    )
     ledger_health = _ledger_health(ledger_path)
     checks = {
         "terminal": str(result.get("status") or "").lower() in TERMINAL_STATUSES,
         "answer_or_capability_unavailable": answer_or_unavailable,
         "completed_is_independently_verified": completed_is_verified,
+        "task_contract_generated": contract_generated,
+        "completed_satisfies_task_contract": completed_satisfies_contract,
         "ledger_valid": bool(result.get("ledger_chain_valid")),
         "zero_http_400": ledger_health["http_400_count"] == 0,
         "zero_serialization_errors": ledger_health["serialization_error_count"] == 0,

@@ -961,6 +961,13 @@ def run_smoke(
             "target_scope": [case_id],
             "constraints": constraints,
             "expected_outputs": ["final_answer", "evidence", "reproduction_steps"],
+            "metadata": {
+                "case_id": case["case_id"],
+                "category": case["category"],
+                "source": case["source"],
+                "difficulty": case["difficulty"],
+                "mode": case["mode"],
+            },
             "autonomy_policy": "automatic",
         }
         response = client.post("/api/v1/tasks", json=task)
@@ -1370,6 +1377,7 @@ def evaluate_baseline(
         "fully_automated": complete and not manual_review_cases,
         "manual_review_cases": manual_review_cases,
         "private_answers_exported": False,
+        "private_source_type": "archive" if archive_path is not None else "dataset_root",
     }
     atomic_write_json(batch_root / "evaluation.json", evaluation)
     write_evaluation_exports(batch_root, evaluation)
@@ -1556,7 +1564,9 @@ def build_parser() -> argparse.ArgumentParser:
         "evaluate-baseline", help="Score an exported baseline without exposing private answers"
     )
     evaluate.add_argument("--experiment-id", required=True)
-    evaluate.add_argument("--archive", type=Path, required=True)
+    private_source = evaluate.add_mutually_exclusive_group(required=True)
+    private_source.add_argument("--archive", type=Path)
+    private_source.add_argument("--dataset-root", type=Path)
     evaluate.add_argument(
         "--selection",
         type=Path,
@@ -1616,6 +1626,7 @@ def main(argv: list[str] | None = None) -> int:
             result = evaluate_baseline(
                 experiment_id=args.experiment_id,
                 archive_path=args.archive,
+                dataset_root=args.dataset_root,
                 state_dir=state_dir,
                 selection_path=args.selection,
             )

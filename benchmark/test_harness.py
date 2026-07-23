@@ -10,11 +10,13 @@ from benchmark.harness import (
     _cleanup_sql,
     _directory_digest,
     _exact_answer_matches,
+    _private_case_directory,
     _safe_member_path,
     _safe_result_payload,
     _token_usage,
     _validate_upload_ref,
     canonical_sha256,
+    load_runtime_contract,
     local_version_summaries,
     ordered_json_sha256,
     render_evaluation_markdown,
@@ -61,6 +63,15 @@ def test_exact_answer_match_requires_the_structured_final_answer() -> None:
     assert _exact_answer_matches("HTB{known-answer}", "HTB{known-answer}")
     assert not _exact_answer_matches("The answer is HTB{known-answer}", "HTB{known-answer}")
     assert not _exact_answer_matches("HTB{known-answer}", "short")
+
+
+def test_private_case_directory_requires_private_public_layout(tmp_path: Path) -> None:
+    (tmp_path / "题目集_Agent可见").mkdir()
+    case = tmp_path / "评测端_禁止提供给Agent" / "01_Web安全" / "CY-WEB-01"
+    case.mkdir(parents=True)
+    assert _private_case_directory(tmp_path, "CY-WEB-01") == case.resolve()
+    with pytest.raises(BenchmarkError):
+        _private_case_directory(tmp_path, "CY-WEB-02")
 
 
 def test_cleanup_sql_is_run_scoped_and_preserves_configuration() -> None:
@@ -183,6 +194,29 @@ def test_runtime_contract_checks_all_provenance_dimensions() -> None:
     assert not mismatched["source_commit_matches"]
     assert not mismatched["image_digest_matches"]
     assert not mismatched["source_worktree_clean"]
+
+
+def test_repository_runtime_contract_declares_reliable_kernel() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    kernel = load_runtime_contract(repo_root)["reliable_kernel"]
+
+    assert kernel["state_owner"] == "runtime_ledger"
+    assert kernel["graph_checkpoint_fields"] == [
+        "run_id",
+        "flow_id",
+        "state_revision",
+        "confirmation",
+        "route",
+        "denied",
+    ]
+    assert kernel["model_max_attempts_env"] == "SECMIND_LLM_MAX_ATTEMPTS"
+    assert kernel["default_model_max_attempts"] == 2
+    assert kernel["tool_retry_policy"] == "idempotent_only"
+    assert kernel["completion_gate_checks"] == [
+        "review_converged",
+        "evidence_closure",
+        "task_contract",
+    ]
 
 
 def test_exact_cwe_scoring(tmp_path: Path) -> None:

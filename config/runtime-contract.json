@@ -4,11 +4,33 @@
     "local-chrome-devtools",
     "local-cyberchef",
     "local-http-fetch",
-    "local-web-security"
+    "local-semgrep",
+    "local-security-extended",
+    "local-web-security",
+    "local-wiremcp"
   ],
-  "expected_tool_count": 53,
+  "expected_tool_count": 88,
   "expected_native_tool_count": 10,
-  "expected_mcp_tool_count": 43,
+  "expected_mcp_tool_count": 78,
+  "reliable_kernel": {
+    "state_owner": "runtime_ledger",
+    "graph_checkpoint_fields": [
+      "run_id",
+      "flow_id",
+      "state_revision",
+      "confirmation",
+      "route",
+      "denied"
+    ],
+    "model_max_attempts_env": "SECMIND_LLM_MAX_ATTEMPTS",
+    "default_model_max_attempts": 2,
+    "tool_retry_policy": "idempotent_only",
+    "completion_gate_checks": [
+      "review_converged",
+      "evidence_closure",
+      "task_contract"
+    ]
+  },
   "version_sources": {
     "prompt": {
       "version": "native-prompts-2026-07-21",
@@ -19,7 +41,7 @@
       "path": "config/model-public.env"
     },
     "mcp": {
-      "version": "local-security-mcp-2026-07-21",
+      "version": "local-security-mcp-2026-07-23",
       "path": "config/mcp-servers.json"
     }
   }

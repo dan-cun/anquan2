@@ -114,6 +114,7 @@ The Compose layer supplies these existing backend settings and does not modify
 | `SECMIND_DATA_DIR`, `SECMIND_LEDGER_DIR` | Persistent application data paths |
 | `SECMIND_RUNTIME_*` | Runtime roots, demo mode, and execution budgets |
 | `SECMIND_LLM_*` | Qwen provider, models, endpoint, and credential |
+| `SECMIND_LLM_MAX_ATTEMPTS` | Bounded transient model attempts per graph stage; defaults to `2` |
 | `SECMIND_QDRANT_*` | Qdrant endpoint, collections, and vector size |
 | `SECMIND_API_KEY` | Optional SecMind API authentication key |
 | `SECMIND_CORS_ORIGINS` | Direct-backend development origins |
@@ -121,6 +122,11 @@ The Compose layer supplies these existing backend settings and does not modify
 
 `VITE_API_BASE_URL=/` and `VITE_WS_BASE_URL=/` compile the frontend for same-origin
 access. Nginx preserves `/api` and `/ws` paths and forwards WebSocket upgrade headers.
+
+The runtime ledger is the sole owner of complete `AgentState`. LangGraph checkpoints
+store only run identity, state revision, and routing metadata. Tool retries require an
+idempotent manifest, and terminal completion still requires review convergence, closed
+evidence references, and the resolved task contract.
 
 ## Troubleshooting
 
