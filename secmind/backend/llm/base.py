@@ -5,10 +5,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.provider import ProviderMessage, ProviderToolCall
 
-class LLMMessage(BaseModel):
-    role: str
-    content: str
+
+class LLMMessage(ProviderMessage):
+    """Internal extension of the validated provider message with audit-only metadata."""
+
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -16,6 +18,7 @@ class LLMResponse(BaseModel):
     content: str
     model: str
     provider: str
+    tool_calls: list[ProviderToolCall] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

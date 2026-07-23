@@ -60,9 +60,11 @@ class RuntimeOrchestrator(BaseOrchestrator):
             attachments=self._attachments_from_metadata(metadata),
             target_scope=self._string_list(metadata.get("target_scope")),
             constraints=self._string_list(metadata.get("constraints")),
-            expected_outputs=(
-                self._string_list(metadata.get("expected_outputs")) or ["security_report"]
-            ),
+            expected_outputs=self._string_list(metadata.get("expected_outputs")),
+            completion_mode=metadata.get("completion_mode"),
+            evaluator=metadata.get("evaluator"),
+            required_evidence=self._string_list(metadata.get("required_evidence")),
+            metadata=metadata,
             autonomy_policy=str(metadata.get("autonomy_policy", "graded")),
         )
         identity = self.execution.prepare_identity(task, flow_id=flow_id)
@@ -131,7 +133,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
             return
 
         graph_state = await self.graph.snapshot(identity.run_id)
-        state = self.runtime.state(identity.run_id) if graph_state.get("runtime_state") else None
+        state = self.runtime.state(identity.run_id) if graph_state.get("run_id") else None
         if graph_state.get("denied"):
             result = "Approval denied."
             status = "denied"
@@ -238,7 +240,7 @@ class RuntimeOrchestrator(BaseOrchestrator):
             return
 
         graph_state = await self.graph.snapshot(run_id)
-        state = self.runtime.state(run_id) if graph_state.get("runtime_state") else None
+        state = self.runtime.state(run_id) if graph_state.get("run_id") else None
         done_event = WSMessage.event(
             "server.done",
             flow_id=flow_id,

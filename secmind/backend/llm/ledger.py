@@ -91,6 +91,9 @@ class LedgerLLMProvider(LLMProvider):
                     "provider": response.provider,
                     "model": response.model,
                     "content": response.content,
+                    "tool_calls": [
+                        item.model_dump(mode="json") for item in response.tool_calls
+                    ],
                     "raw": response.raw,
                 },
                 context=context,

@@ -8,6 +8,11 @@ from typing import Protocol
 from uuid import uuid4
 
 from app.schemas.agents import AgentRole
+from app.schemas.provider import (
+    AgentObservation,
+    ProviderToolCall,
+    validate_provider_message_sequence,
+)
 from llm.base import LLMMessage
 
 
@@ -25,13 +30,42 @@ class AgentMessageChain:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     on_append: Callable[[LLMMessage, int], None] | None = field(default=None, repr=False)
 
-    def append(self, role: str, content: str, **metadata: object) -> LLMMessage:
-        message = LLMMessage(role=role, content=content, metadata=dict(metadata))
+    def append(
+        self,
+        role: str,
+        content: str | None,
+        *,
+        tool_calls: list[ProviderToolCall] | None = None,
+        tool_call_id: str | None = None,
+        name: str | None = None,
+        **metadata: object,
+    ) -> LLMMessage:
+        message = LLMMessage(
+            role=role,
+            content=content,
+            tool_calls=tool_calls or [],
+            tool_call_id=tool_call_id,
+            name=name,
+            metadata=dict(metadata),
+        )
+        validate_provider_message_sequence([*self.messages, message], require_resolved=False)
         self.messages.append(message)
         if self.on_append is not None:
             self.on_append(message, len(self.messages))
         self.updated_at = datetime.now(UTC)
         return message
+
+    def append_observation(self, observation: AgentObservation) -> LLMMessage:
+        message = observation.as_provider_message()
+        return self.append(
+            message.role,
+            message.content,
+            context_kind="observation",
+            observation_id=observation.observation_id,
+            observation_source=observation.source,
+            source_id=observation.source_id,
+            evidence_ids=observation.evidence_ids,
+        )
 
 
 class MessageChainStore(Protocol):

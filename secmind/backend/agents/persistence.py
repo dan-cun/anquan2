@@ -45,11 +45,19 @@ class PersistentMessageChainStore(MessageChainStore):
         )
 
         def persist(message: LLMMessage, sequence: int) -> None:
+            content_data = dict(message.metadata)
+            if message.tool_calls:
+                content_data["tool_calls"] = [
+                    item.model_dump(mode="json") for item in message.tool_calls
+                ]
+            if message.name is not None:
+                content_data["name"] = message.name
             self.repository.append_chain_entry(
                 chain_id=chain.chain_id,
                 role=message.role,
-                content=message.content,
-                content_data=message.metadata,
+                content=message.content or "",
+                content_data=content_data,
+                tool_call_id=message.tool_call_id,
                 sequence=sequence,
             )
 

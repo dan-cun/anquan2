@@ -273,7 +273,13 @@ async def test_role_without_tool_capability_cannot_invoke_known_tool() -> None:
     assert result.status == AgentStatus.COMPLETED
     assert gateway.invocations == []
     second_request = model.message_snapshots[1]
-    observation = next(message for message in second_request if message.role == "tool")
+    observation = next(
+        message
+        for message in second_request
+        if message.metadata.get("context_kind") == "observation"
+    )
+    assert observation.role == "user"
+    assert json.loads(observation.content)["observation_type"] == "agent_observation"
     assert "TOOL_NOT_ALLOWED_FOR_ROLE" in observation.content
     catalog = next(
         message
@@ -415,6 +421,22 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
     assert len(chains) == 4
     assert len({item.chain_id for item in chains}) == 4
     assert {item.agent_instance_id for item in chains} == {item.instance_id for item in instances}
+    primary_chain = next(item for item in chains if item.agent_role == AgentRole.PRIMARY_AGENT)
+    delegated_observations = [
+        message
+        for message in primary_chain.messages
+        if message.metadata.get("observation_source") == "agent"
+    ]
+    assert len(delegated_observations) == 3
+    assert all(message.role == "user" for message in delegated_observations)
+    assert all(message.role != "tool" for message in primary_chain.messages)
+    observation_payloads = [json.loads(message.content) for message in delegated_observations]
+    assert observation_payloads[0]["evidence_ids"] == ["evidence-code"]
+    assert observation_payloads[1]["evidence_ids"] == ["evidence-validation"]
+    assert all(
+        item["final_report"]["report_type"] == "agent_final_report"
+        for item in observation_payloads
+    )
 
     assert len(gateway.invocations) == 1
     assert gateway.invocations[0].tool_id == "native:code_scan"

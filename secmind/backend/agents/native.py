@@ -16,6 +16,7 @@ from app.schemas.agents import (
     AgentStatus,
     AgentTask,
 )
+from app.schemas.provider import AgentFinalReport, AgentObservation
 from app.schemas.tools import UnifiedToolDefinition, UnifiedToolInvocation, UnifiedToolResult
 from llm.base import LLMMessage, LLMProvider
 
@@ -76,6 +77,59 @@ def _merge_unique(target: list[str], values: list[str]) -> None:
         if value not in known:
             target.append(value)
             known.add(value)
+
+
+def _agent_result_observation(result: AgentResult, role: AgentRole) -> AgentObservation:
+    report = AgentFinalReport(
+        agent_instance_id=result.agent_instance_id,
+        task_id=result.task_id,
+        status=result.status.value,
+        summary=result.summary,
+        data=result.data,
+        artifact_refs=result.artifact_refs,
+        evidence_ids=result.evidence_ids,
+        finding_ids=result.finding_ids,
+        error_code=result.error_code,
+        error_message=result.error_message,
+    )
+    return AgentObservation(
+        source="agent",
+        source_id=result.agent_instance_id,
+        summary=result.summary or result.error_message or f"{role.value} returned no summary",
+        status=result.status.value,
+        artifact_refs=result.artifact_refs,
+        evidence_ids=result.evidence_ids,
+        finding_ids=result.finding_ids,
+        final_report=report,
+        metadata={"delegated_role": role.value},
+    )
+
+
+def _tool_result_observation(result: UnifiedToolResult) -> AgentObservation:
+    return AgentObservation(
+        source="tool",
+        source_id=result.invocation_id,
+        summary=result.text or result.error_message or f"{result.tool_id} returned no summary",
+        status=result.status.value,
+        data=result.data,
+        artifact_refs=result.artifact_refs,
+        evidence_ids=result.evidence_ids,
+        metadata={
+            "tool_id": result.tool_id,
+            "error_code": result.error_code,
+            "duration_ms": result.duration_ms,
+        },
+    )
+
+
+def _policy_observation(*, source_id: str, summary: str, terminal: bool) -> AgentObservation:
+    return AgentObservation(
+        source="policy",
+        source_id=source_id,
+        summary=summary,
+        status="blocked" if terminal else "guidance",
+        metadata={"terminal": terminal},
+    )
 
 
 @dataclass(slots=True)
@@ -281,6 +335,7 @@ class ModelNativeAgent(NativeAgent):
             context.chain.append(
                 "assistant",
                 response.content,
+                tool_calls=response.tool_calls,
                 provider=response.provider,
                 model=response.model,
                 iteration=iteration,
@@ -307,11 +362,8 @@ class ModelNativeAgent(NativeAgent):
                     ),
                     expected_outputs=["public corrective instruction"],
                 )
-                context.chain.append(
-                    "tool",
-                    reflection.model_dump_json(),
-                    delegated_role=AgentRole.REFLECTOR.value,
-                    result_status=reflection.status.value,
+                context.chain.append_observation(
+                    _agent_result_observation(reflection, AgentRole.REFLECTOR)
                 )
                 continue
 
@@ -326,11 +378,12 @@ class ModelNativeAgent(NativeAgent):
                     "loop.detected",
                     loop_detection.event_payload(),
                 )
-                context.chain.append(
-                    "tool",
-                    loop_detection.model_instruction(),
-                    loop_guard=True,
-                    detection_id=loop_detection.detection_id,
+                context.chain.append_observation(
+                    _policy_observation(
+                        source_id=loop_detection.detection_id,
+                        summary=loop_detection.model_instruction(),
+                        terminal=loop_detection.terminal,
+                    )
                 )
                 if loop_detection.terminal:
                     return self._failed(
@@ -359,12 +412,7 @@ class ModelNativeAgent(NativeAgent):
                     constraints=action.constraints,
                     expected_outputs=action.expected_outputs,
                 )
-                context.chain.append(
-                    "tool",
-                    result.model_dump_json(),
-                    delegated_role=action.role.value,
-                    result_status=result.status.value,
-                )
+                context.chain.append_observation(_agent_result_observation(result, action.role))
                 loop_detection = loop_guard.record_result(
                     action_fp,
                     result,
@@ -377,11 +425,12 @@ class ModelNativeAgent(NativeAgent):
                         "loop.detected",
                         loop_detection.event_payload(),
                     )
-                    context.chain.append(
-                        "tool",
-                        loop_detection.model_instruction(),
-                        loop_guard=True,
-                        detection_id=loop_detection.detection_id,
+                    context.chain.append_observation(
+                        _policy_observation(
+                            source_id=loop_detection.detection_id,
+                            summary=loop_detection.model_instruction(),
+                            terminal=loop_detection.terminal,
+                        )
                     )
                     if loop_detection.terminal:
                         return self._failed(
@@ -393,12 +442,7 @@ class ModelNativeAgent(NativeAgent):
 
             assert action.tool_id is not None
             tool_result = await context.invoke_tool(action.tool_id, action.arguments)
-            context.chain.append(
-                "tool",
-                tool_result.model_dump_json(),
-                tool_id=action.tool_id,
-                result_status=tool_result.status.value,
-            )
+            context.chain.append_observation(_tool_result_observation(tool_result))
             loop_detection = loop_guard.record_result(
                 action_fp,
                 tool_result,
@@ -411,11 +455,12 @@ class ModelNativeAgent(NativeAgent):
                     "loop.detected",
                     loop_detection.event_payload(),
                 )
-                context.chain.append(
-                    "tool",
-                    loop_detection.model_instruction(),
-                    loop_guard=True,
-                    detection_id=loop_detection.detection_id,
+                context.chain.append_observation(
+                    _policy_observation(
+                        source_id=loop_detection.detection_id,
+                        summary=loop_detection.model_instruction(),
+                        terminal=loop_detection.terminal,
+                    )
                 )
                 if loop_detection.terminal:
                     return self._failed(

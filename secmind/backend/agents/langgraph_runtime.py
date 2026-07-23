@@ -14,8 +14,9 @@ from ledger.serialization import checkpoint_roundtrip
 
 
 class RuntimeGraphState(TypedDict, total=False):
+    run_id: str
     flow_id: str
-    runtime_state: dict[str, Any]
+    state_revision: int
     confirmation: dict[str, Any]
     route: str
     denied: bool
@@ -178,8 +179,9 @@ class LangGraphRuntime:
         )
         input_state: RuntimeGraphState = checkpoint_roundtrip(
             {
+                "run_id": state.run_id,
                 "flow_id": flow_id,
-                "runtime_state": state.model_dump(mode="json"),
+                "state_revision": state.state_revision,
             }
         )
         if confirmation is not None:
@@ -208,8 +210,9 @@ class LangGraphRuntime:
         result = await self.graph.ainvoke(
             checkpoint_roundtrip(
                 {
+                    "run_id": state.run_id,
                     "flow_id": state.flow_id or state.run_id,
-                    "runtime_state": state.model_dump(mode="json"),
+                    "state_revision": state.state_revision,
                 }
             ),
             config=self._config(state.run_id),
@@ -344,29 +347,31 @@ class LangGraphRuntime:
     async def _memory_commit(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_memory_commit(self._state(value)))
 
-    @staticmethod
-    def _state(value: RuntimeGraphState) -> AgentState:
-        return AgentState.model_validate(value["runtime_state"])
+    def _state(self, value: RuntimeGraphState) -> AgentState:
+        return self.runtime.state(value["run_id"])
 
-    @staticmethod
     def _update(
+        self,
         state: AgentState,
         route: str | None = None,
         *,
         denied: bool | None = None,
     ) -> RuntimeGraphState:
-        update: RuntimeGraphState = {"runtime_state": state.model_dump(mode="json")}
+        update: RuntimeGraphState = {
+            "run_id": state.run_id,
+            "flow_id": state.flow_id or state.run_id,
+            "state_revision": state.state_revision,
+        }
         if route is not None:
             update["route"] = route
         if denied is not None:
             update["denied"] = denied
         return checkpoint_roundtrip(update)
 
-    @staticmethod
-    def _start_route(state: RuntimeGraphState) -> str:
+    def _start_route(self, state: RuntimeGraphState) -> str:
         if state.get("confirmation"):
             return "confirmation_gate"
-        runtime_state = AgentState.model_validate(state["runtime_state"])
+        runtime_state = self._state(state)
         if runtime_state.pending_approval is not None:
             return "approval"
         if not runtime_state.workspace:

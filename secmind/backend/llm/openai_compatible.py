@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from app.schemas.provider import ProviderMessage, ProviderToolCall
 from llm.base import LLMMessage, LLMProvider, LLMResponse, ProviderHTTPError
 from llm.http_client import create_http_client
 from llm.provider_request import ProviderRequest
@@ -78,10 +79,9 @@ class OpenAICompatibleProvider(LLMProvider):
         request_values: dict[str, Any] = {
             "model": model,
             "messages": [
-                {
-                    "role": message.role,
-                    "content": message.content,
-                }
+                ProviderMessage.model_validate(
+                    message.model_dump(mode="python", exclude={"metadata"})
+                )
                 for message in messages
             ],
             "temperature": temperature,
@@ -102,8 +102,13 @@ class OpenAICompatibleProvider(LLMProvider):
                         sort_keys=True,
                         separators=(",", ":"),
                     )
-                    request_values["messages"][0]["content"] += (
-                        "\nReturn exactly one JSON object matching this schema: " + schema_text
+                    first_message = request_values["messages"][0]
+                    request_values["messages"][0] = first_message.model_copy(
+                        update={
+                            "content": (first_message.content or "")
+                            + "\nReturn exactly one JSON object matching this schema: "
+                            + schema_text
+                        }
                     )
             elif isinstance(response_schema, dict):
                 request_values["response_format"] = {
@@ -147,10 +152,14 @@ class OpenAICompatibleProvider(LLMProvider):
 
         choice = raw.get("choices", [{}])[0]
         message = choice.get("message", {})
+        tool_calls = [
+            ProviderToolCall.model_validate(item) for item in message.get("tool_calls") or []
+        ]
         return LLMResponse(
-            content=str(message.get("content", "")),
+            content=str(message.get("content") or ""),
             model=str(raw.get("model", payload["model"])),
             provider=self.name,
+            tool_calls=tool_calls,
             raw=raw,
         )
 

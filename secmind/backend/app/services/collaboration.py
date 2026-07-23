@@ -50,7 +50,9 @@ class NativeDemoLLMProvider(LLMProvider):
 
     async def complete(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
         stage = str(kwargs.get("stage") or "")
-        has_observation = any(message.role == "tool" for message in messages)
+        has_observation = any(
+            message.metadata.get("context_kind") == "observation" for message in messages
+        )
         if stage == "agent.assistant" and not has_observation:
             body = {
                 "action": "delegate",

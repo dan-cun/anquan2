@@ -21,6 +21,9 @@ def test_runtime_upload_task_report_and_ledger(client):
     run_id = identity["run_id"]
     assert identity["flow_id"]
     assert identity["task_id"]
+    assert identity["task_contract"]["completion_mode"] == "findings"
+    assert identity["task_contract"]["evaluator"] == "evidence_backed_findings"
+    assert len(identity["task_contract"]["contract_sha256"]) == 64
 
     status = None
     for _ in range(100):
@@ -42,6 +45,8 @@ def test_runtime_upload_task_report_and_ledger(client):
     assert report_payload["task_id"] == identity["task_id"]
     assert report_payload["review_rounds"] == 2
     assert report_payload["review_converged"] is True
+    assert report_payload["task_contract"] == identity["task_contract"]
+    assert all(report_payload["completion_gate_checks"].values())
 
     services = client.app.state.services
     persisted_report = services.repositories.results.latest_report(run_id)

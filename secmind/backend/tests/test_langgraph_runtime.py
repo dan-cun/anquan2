@@ -29,13 +29,14 @@ from app.schemas.runtime import (
 )
 from app.services.runtime import RuntimeEventHub, RuntimeRunService
 from ledger.runtime_store import RuntimeLedgerStore
-from llm.base import LLMResponse
+from llm.base import LLMResponse, ProviderHTTPError
 from tools.runtime import RuntimeTool, RuntimeToolBroker, RuntimeToolRegistry
 
 
 class ControlledModelManager:
-    def __init__(self) -> None:
+    def __init__(self, *, plan_max_attempts: int = 2) -> None:
         self.stages: list[str] = []
+        self.plan_max_attempts = plan_max_attempts
 
     def metadata(self) -> dict[str, Any]:
         return {"configured": True, "name": "controlled", "model": "controlled-model"}
@@ -67,7 +68,7 @@ class ControlledModelManager:
                             "inputs": {"target": "."},
                             "success_criteria": ["Return a structured result"],
                             "risk_hint": 1,
-                            "max_attempts": 2,
+                            "max_attempts": self.plan_max_attempts,
                         }
                     ]
                 }
@@ -150,6 +151,7 @@ def build_runtime(
     checkpointer: Any | None = None,
     idempotent: bool = True,
     emit_finding: bool = True,
+    plan_max_attempts: int = 2,
 ) -> tuple[RuntimeRunService, ControlledTool, ControlledModelManager]:
     database_url = f"sqlite:///{(tmp_path / 'runtime.db').as_posix()}"
     settings = Settings(
@@ -174,7 +176,7 @@ def build_runtime(
         emit_finding=emit_finding,
     )
     registry.register(tool)
-    model = ControlledModelManager()
+    model = ControlledModelManager(plan_max_attempts=plan_max_attempts)
     runtime = RuntimeRunService(
         settings=settings,
         ledger=RuntimeLedgerStore(settings.resolved_runtime_database_url),
@@ -263,6 +265,116 @@ async def test_failed_idempotent_tool_routes_through_reflect_and_retries(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_graph_checkpoint_references_authoritative_runtime_state(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+
+    state = await runtime.run_inline(audit_task(), "single-owner-run")
+    snapshot = await runtime.graph_runtime.snapshot("single-owner-run")
+
+    assert snapshot["run_id"] == state.run_id
+    assert snapshot["state_revision"] == state.state_revision
+    assert "runtime_state" not in snapshot
+
+
+@pytest.mark.asyncio
+async def test_idempotent_tool_retry_count_is_strictly_bounded(tmp_path: Path) -> None:
+    runtime, tool, _ = build_runtime(
+        tmp_path,
+        outcomes=[ToolStatus.ERROR, ToolStatus.ERROR, ToolStatus.ERROR, ToolStatus.SUCCESS],
+        plan_max_attempts=3,
+    )
+
+    state = await runtime.run_inline(audit_task(), "bounded-tool-retry-run")
+
+    assert state.status == RunStatus.PARTIAL
+    assert state.retry_counts == {"audit-python-bandit": 2}
+    assert state.reflection_count == 2
+    assert tool.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_tool_is_never_retried(tmp_path: Path) -> None:
+    runtime, tool, _ = build_runtime(
+        tmp_path,
+        outcomes=[ToolStatus.ERROR, ToolStatus.SUCCESS],
+        idempotent=False,
+        plan_max_attempts=3,
+    )
+
+    state = await runtime.run_inline(audit_task(), "non-idempotent-tool-run")
+
+    assert state.status == RunStatus.PARTIAL
+    assert state.retry_counts == {}
+    assert state.reflection_count == 0
+    assert tool.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_model_failure_uses_bounded_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, model = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "bounded-model-retry-run")
+    runtime.ledger.save_state(state)
+    calls = 0
+
+    async def flaky_complete(messages: list[Any], **kwargs: Any) -> LLMResponse:
+        nonlocal calls
+        del messages, kwargs
+        calls += 1
+        if calls == 1:
+            raise ProviderHTTPError(503, {"message": "temporary outage"})
+        return LLMResponse(content="recovered", model="controlled-model", provider="controlled")
+
+    monkeypatch.setattr(model, "complete", flaky_complete)
+    result = await runtime._call_model(
+        state,
+        stage="test",
+        system="test",
+        payload={},
+        max_tokens=10,
+    )
+
+    assert result == "recovered"
+    assert calls == 2
+    assert state.budget.model_calls_used == 2
+    assert any(item.decision == "retry_model_test" for item in state.decisions)
+
+
+@pytest.mark.asyncio
+async def test_permanent_model_failure_degrades_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, model = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "model-fallback-run")
+    runtime.ledger.save_state(state)
+    calls = 0
+
+    async def invalid_request(messages: list[Any], **kwargs: Any) -> LLMResponse:
+        nonlocal calls
+        del messages, kwargs
+        calls += 1
+        raise ProviderHTTPError(400, {"message": "invalid request"})
+
+    monkeypatch.setattr(model, "complete", invalid_request)
+    result = await runtime._call_model(
+        state,
+        stage="test",
+        system="test",
+        payload={},
+        max_tokens=10,
+    )
+
+    assert result is None
+    assert calls == 1
+    assert state.budget.model_calls_used == 1
+    fallback = next(item for item in state.decisions if item.decision == "model_test_fallback")
+    assert fallback.model_id == "deterministic-test-ProviderHTTPError-after-1-attempts-fallback"
+
+
+@pytest.mark.asyncio
 async def test_model_budget_caps_managed_calls(tmp_path: Path) -> None:
     runtime, _, model = build_runtime(tmp_path, max_model_calls=2)
 
@@ -315,6 +427,38 @@ async def test_finding_task_rejects_successful_tool_with_empty_evidence(tmp_path
     assert state.review_converged is True
     assert state.completion_gate_reason is not None
     assert "at least one finding" in state.completion_gate_reason
+
+
+@pytest.mark.asyncio
+async def test_completion_gate_rejects_evidence_not_in_verified_delta(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "unverified-evidence-run")
+    evidence = Evidence(
+        evidence_id="unverified-evidence",
+        source="test",
+        summary="Recorded but never independently verified",
+    )
+    state.evidence = [evidence]
+    state.findings = [
+        Finding(
+            finding_id="unverified-finding",
+            rule_id="TEST-UNVERIFIED",
+            path="test.py",
+            title="Unverified finding",
+            description="The evidence reference exists but has no verification delta.",
+            evidence_ids=[evidence.evidence_id],
+        )
+    ]
+    state.review_converged = True
+    state.status = RunStatus.RUNNING
+    runtime.ledger.save_state(state)
+
+    updated = await runtime.node_completion_gate(state)
+
+    assert updated.status == RunStatus.PARTIAL
+    assert updated.verification_passed is False
+    assert updated.completion_gate_checks["evidence_closure"] is False
+    assert updated.completion_gate_reason == "Evidence reference closure was not satisfied"
 
 
 @pytest.mark.asyncio
@@ -441,6 +585,111 @@ async def test_answer_task_requires_answer_and_verification_result(tmp_path: Pat
     assert state.final_answer_verified is True
     assert state.report is not None
     assert state.report.final_answer == "answer-42"
+
+
+@pytest.mark.asyncio
+async def test_successful_answer_tool_cannot_bypass_missing_contract_outputs(
+    tmp_path: Path,
+) -> None:
+    runtime, _, _ = build_runtime(tmp_path, emit_finding=False)
+
+    async def collaboration(state: Any, review_round: int) -> dict[str, Any]:
+        return {
+            "agent_result": {
+                "agent_instance_id": f"answer-agent-{review_round}",
+                "task_id": state.task_id,
+                "status": "completed",
+                "data": {"final_answer": "answer-without-proof"},
+            },
+            "tool_calls": [
+                {
+                    "invocation_id": f"answer-verifier-{review_round}",
+                    "tool_id": "sandbox:answer-verifier",
+                    "status": "completed",
+                    "data": {"verification_result": "verified"},
+                }
+            ],
+        }
+
+    runtime.set_collaboration_runner(collaboration)
+    state = await runtime.run_inline(
+        audit_task(
+            expected_outputs=["final_answer", "evidence", "reproduction_steps"],
+            completion_mode="final_answer",
+        ),
+        "missing-contract-output-run",
+        task_id="missing-contract-output-task",
+    )
+
+    assert state.status == RunStatus.PARTIAL
+    assert state.final_answer_verified is True
+    assert state.completion_gate_checks["output:evidence"] is False
+    assert state.completion_gate_checks["output:reproduction_steps"] is False
+    assert state.completion_gate_reason == (
+        "Task contract missing expected output(s): evidence, reproduction_steps"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_answer_contract_requires_outputs_evidence_and_evaluator(
+    tmp_path: Path,
+) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+
+    async def collaboration(state: Any, review_round: int) -> dict[str, Any]:
+        evidence_id = f"answer-evidence-{review_round}"
+        return {
+            "agent_result": {
+                "agent_instance_id": f"complete-answer-agent-{review_round}",
+                "task_id": state.task_id,
+                "status": "completed",
+                "data": {
+                    "final_answer": "verified-answer",
+                    "reproduction_steps": ["Run the supplied verifier", "Compare its output"],
+                },
+                "evidence_ids": [evidence_id],
+            },
+            "evidence": [
+                {
+                    "evidence_id": evidence_id,
+                    "source": "answer-verifier",
+                    "summary": "Independent answer verification output",
+                }
+            ],
+            "tool_calls": [
+                {
+                    "invocation_id": f"complete-answer-verifier-{review_round}",
+                    "tool_id": "sandbox:answer-verifier",
+                    "status": "completed",
+                    "data": {"verification_result": "verified"},
+                    "evidence_ids": [evidence_id],
+                }
+            ],
+        }
+
+    runtime.set_collaboration_runner(collaboration)
+    state = await runtime.run_inline(
+        audit_task(
+            expected_outputs=["final_answer", "evidence", "reproduction_steps"],
+            completion_mode="final_answer",
+            evaluator="final_answer_independent_verification",
+        ),
+        "complete-answer-contract-run",
+        task_id="complete-answer-contract-task",
+    )
+
+    assert state.status == RunStatus.COMPLETED
+    assert all(state.completion_gate_checks.values())
+    assert state.task_contract is not None
+    assert state.report is not None
+    assert state.report.task_contract == state.task_contract
+    assert state.report.reproduction_steps == [
+        "Run the supplied verifier",
+        "Compare its output",
+    ]
+    summary = runtime.summary(state.run_id)
+    assert summary.task_contract == state.task_contract
+    assert summary.completion_gate_checks == state.completion_gate_checks
 
 
 @pytest.mark.asyncio

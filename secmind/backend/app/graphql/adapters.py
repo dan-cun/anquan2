@@ -136,9 +136,11 @@ class NativeGraphQLAdapter:
                 objective=input.content,
                 target_scope=_strings(metadata.get("target_scope")),
                 constraints=_strings(metadata.get("constraints")),
-                expected_outputs=(
-                    _strings(metadata.get("expected_outputs")) or ["security_report"]
-                ),
+                expected_outputs=_strings(metadata.get("expected_outputs")),
+                completion_mode=metadata.get("completion_mode"),
+                evaluator=metadata.get("evaluator"),
+                required_evidence=_strings(metadata.get("required_evidence")),
+                metadata=metadata,
                 autonomy_policy=str(metadata.get("autonomy_policy", "graded")),
             ),
             flow_id=flow_id,

@@ -49,10 +49,12 @@ async def upload(file: Annotated[UploadFile, File(...)], settings: SettingsDep) 
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED)
 async def create_task(task: TaskRequest, services: AppServicesDep) -> dict[str, Any]:
     identity = services.execution.submit(task)
+    state = services.runtime.state(identity.run_id)
     return {
         "schema_version": "1.0",
         **identity.model_dump(mode="json"),
         "status": RunStatus.PENDING,
+        "task_contract": state.task_contract.model_dump(mode="json"),
     }
 
 

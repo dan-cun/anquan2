@@ -502,6 +502,12 @@ class Report:
     executive_summary: str
     findings: JSON
     evidence: JSON
+    final_answer: str | None
+    reproduction_steps: list[str]
+    completion_mode: str
+    task_contract: JSON | None
+    completion_gate_checks: JSON
+    completion_gate_reason: str | None
     limitations: list[str]
     generated_at: datetime
 

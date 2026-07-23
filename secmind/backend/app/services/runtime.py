@@ -25,6 +25,7 @@ from app.schemas.runtime import (
     DecisionRecord,
     EventContext,
     Evidence,
+    EvidenceClosureResult,
     ExecutionReceipt,
     Finding,
     KnowledgeHit,
@@ -35,6 +36,7 @@ from app.schemas.runtime import (
     RuntimeToolContext,
     RuntimeToolResult,
     Scenario,
+    TaskContract,
     TaskRequest,
     ToolStatus,
     UnitOutcomeStatus,
@@ -43,6 +45,7 @@ from app.schemas.runtime import (
 )
 from app.services.capabilities import CapabilityRouter
 from app.services.ingest import IngestError, InputIngestor
+from app.services.task_contracts import resolve_task_contract
 from app.services.workspace_context import relevant_workspace_chunks
 from knowledge.models import VerifierAttestation
 from ledger.runtime_store import RuntimeLedgerStore
@@ -192,7 +195,15 @@ class RuntimeRunService:
         run_id = run_id or str(uuid4())
         state = self.new_state(task, run_id, flow_id=flow_id, task_id=task_id)
         self.ledger.save_state(state)
-        self.ledger.append(run_id, "run.queued", {"objective": task.objective}, actor="api")
+        self.ledger.append(
+            run_id,
+            "run.queued",
+            {
+                "objective": state.task.objective,
+                "task_contract": state.task_contract.model_dump(mode="json"),
+            },
+            actor="api",
+        )
         self._spawn(self._start_state(state))
         return run_id
 
@@ -211,7 +222,15 @@ class RuntimeRunService:
             task_id=task_id,
         )
         self.ledger.save_state(state)
-        await self._event(state, "run.queued", {"objective": task.objective}, actor="api")
+        await self._event(
+            state,
+            "run.queued",
+            {
+                "objective": state.task.objective,
+                "task_contract": state.task_contract.model_dump(mode="json"),
+            },
+            actor="api",
+        )
         return state
 
     async def run_inline(
@@ -254,11 +273,13 @@ class RuntimeRunService:
             total_steps=len(state.plan),
             active_step_id=state.active_step_id,
             verification_passed=state.verification_passed,
+            task_contract=state.task_contract,
             completion_mode=state.completion_mode,
             final_answer_verified=state.final_answer_verified,
             review_round=state.review_round,
             review_converged=state.review_converged,
             completion_gate_reason=state.completion_gate_reason,
+            completion_gate_checks=state.completion_gate_checks,
             state_revision=state.state_revision,
             pending_approval=state.pending_approval,
             last_error=state.last_error,
@@ -285,12 +306,23 @@ class RuntimeRunService:
         flow_id: str | None = None,
         task_id: str | None = None,
     ) -> AgentState:
+        task_contract = resolve_task_contract(task)
+        task = task.model_copy(
+            update={
+                "expected_outputs": task_contract.expected_outputs,
+                "completion_mode": task_contract.completion_mode,
+                "evaluator": task_contract.evaluator,
+                "required_evidence": task_contract.required_evidence,
+            },
+            deep=True,
+        )
         return AgentState(
             run_id=run_id,
             flow_id=flow_id or run_id,
             task_id=task_id,
             task=task,
-            completion_mode=self._completion_mode(task),
+            task_contract=task_contract,
+            completion_mode=task_contract.completion_mode,
             status=RunStatus.PENDING,
             budget=BudgetState(
                 max_steps=self.settings.runtime_max_steps,
@@ -954,14 +986,8 @@ class RuntimeRunService:
     async def node_verify(self, state: AgentState) -> tuple[AgentState, str]:
         step = state.plan[state.current_step_index]
         latest = state.observations[-1]
-        orphaned = [item.finding_id for item in state.findings if not item.evidence_ids]
-        evidence_ids = {item.evidence_id for item in state.evidence}
-        broken = [
-            item.finding_id
-            for item in state.findings
-            if any(reference not in evidence_ids for reference in item.evidence_ids)
-        ]
-        deterministic_pass = latest.status == ToolStatus.SUCCESS and not orphaned and not broken
+        closure = self._evidence_closure(state, require_verification=False)
+        deterministic_pass = latest.status == ToolStatus.SUCCESS and closure.passed
         model_verification = await self._call_model(
             state,
             stage="verify",
@@ -972,17 +998,12 @@ class RuntimeRunService:
             payload={
                 "pass": deterministic_pass,
                 "tool_status": latest.status.value,
-                "orphaned_findings": orphaned,
-                "broken_evidence_references": broken,
+                "evidence_closure": closure.model_dump(mode="json"),
             },
             max_tokens=250,
         )
         state.verification_passed = deterministic_pass
-        verified_finding_ids = sorted(
-            item.finding_id
-            for item in state.findings
-            if item.evidence_ids and set(item.evidence_ids).issubset(evidence_ids)
-        )
+        verified_finding_ids = closure.closed_finding_ids
         self._record_receipt(
             state,
             unit_type="verification",
@@ -997,7 +1018,7 @@ class RuntimeRunService:
                 if deterministic_pass
                 else "Tool result or evidence references did not pass verification"
             ),
-            evidence_ids=sorted(evidence_ids),
+            evidence_ids=closure.closed_evidence_ids,
             finding_ids=verified_finding_ids,
         )
         if deterministic_pass and verified_finding_ids:
@@ -1005,7 +1026,7 @@ class RuntimeRunService:
                 state,
                 source=f"runtime-verifier:{step.step_id}",
                 finding_ids=verified_finding_ids,
-                evidence_ids=sorted(evidence_ids),
+                evidence_ids=closure.closed_evidence_ids,
             )
         if deterministic_pass:
             state.last_error = None
@@ -1016,7 +1037,7 @@ class RuntimeRunService:
                         model_verification
                         or "All normalized findings reference captured tool evidence."
                     ),
-                    evidence_ids=sorted(evidence_ids),
+                    evidence_ids=closure.closed_evidence_ids,
                     policy_ids=["EVIDENCE-REQUIRED-V1"],
                     model_id="managed-llm" if model_verification else "deterministic-verifier",
                     prompt_version="verify-v2",
@@ -1107,15 +1128,62 @@ class RuntimeRunService:
         )
 
     async def node_completion_gate(self, state: AgentState) -> AgentState:
-        evidence_ids = {item.evidence_id for item in state.evidence}
+        contract = state.task_contract or resolve_task_contract(state.task)
+        state.task_contract = contract
+        state.completion_mode = contract.completion_mode
+        closure = self._evidence_closure(state, require_verification=True)
+        verified_finding_ids = set(closure.closed_finding_ids)
         verified_findings = [
             item
             for item in state.findings
-            if item.evidence_ids and set(item.evidence_ids).issubset(evidence_ids)
+            if item.finding_id in verified_finding_ids
         ]
+        checks: dict[str, bool] = {
+            "review_converged": state.review_converged,
+            "evidence_closure": closure.passed,
+            f"evaluator:{contract.evaluator}": self._evaluator_prerequisite_passed(
+                state,
+                contract,
+                verified_findings,
+            ),
+        }
+        checks.update(
+            {
+                f"output:{item}": self._expected_output_present(
+                    state,
+                    item,
+                    verified_findings,
+                )
+                for item in contract.expected_outputs
+            }
+        )
+        checks.update(
+            {
+                f"evidence:{item}": self._required_evidence_present(
+                    state,
+                    item,
+                    verified_findings,
+                )
+                for item in contract.required_evidence
+            }
+        )
+        failed_outputs = [
+            key.removeprefix("output:")
+            for key, value in checks.items()
+            if key.startswith("output:") and not value
+        ]
+        failed_evidence = [
+            key.removeprefix("evidence:")
+            for key, value in checks.items()
+            if key.startswith("evidence:") and not value
+        ]
+        evaluator_passed = checks[f"evaluator:{contract.evaluator}"]
         if not state.review_converged:
             passed = False
             reason = "Secondary review did not converge without new findings"
+        elif not closure.passed:
+            passed = False
+            reason = "Evidence reference closure was not satisfied"
         elif state.completion_mode == CompletionMode.FINDINGS:
             passed = bool(verified_findings)
             reason = (
@@ -1133,8 +1201,19 @@ class RuntimeRunService:
                     "verification result"
                 )
             )
+        if passed and failed_outputs:
+            passed = False
+            reason = "Task contract missing expected output(s): " + ", ".join(failed_outputs)
+        if passed and failed_evidence:
+            passed = False
+            reason = "Task contract missing required evidence: " + ", ".join(failed_evidence)
+        if passed and not evaluator_passed:
+            passed = False
+            reason = f"Task evaluator prerequisite was not satisfied: {contract.evaluator}"
+        passed = passed and all(checks.values())
         state.verification_passed = passed
         state.completion_gate_reason = reason
+        state.completion_gate_checks = checks
         if not passed and state.status not in {RunStatus.DENIED, RunStatus.FAILED}:
             state.status = RunStatus.PARTIAL
             state.last_error = reason
@@ -1143,7 +1222,10 @@ class RuntimeRunService:
             "completion.gate_evaluated",
             {
                 "passed": passed,
-                "mode": state.completion_mode.value,
+                "mode": contract.completion_mode.value,
+                "task_contract": contract.model_dump(mode="json"),
+                "checks": checks,
+                "evidence_closure": closure.model_dump(mode="json"),
                 "verified_finding_ids": [item.finding_id for item in verified_findings],
                 "final_answer_present": bool(state.final_answer),
                 "final_answer_verified": state.final_answer_verified,
@@ -1246,10 +1328,13 @@ class RuntimeRunService:
             verified_deltas=state.verified_deltas,
             final_answer=state.final_answer,
             final_answer_verified=state.final_answer_verified,
+            reproduction_steps=state.reproduction_steps,
+            task_contract=state.task_contract,
             completion_mode=state.completion_mode,
             review_rounds=state.review_round,
             review_converged=state.review_converged,
             completion_gate_reason=state.completion_gate_reason,
+            completion_gate_checks=state.completion_gate_checks,
             limitations=limitations,
         )
         if self._task_finalizer is not None and state.task_id is not None:
@@ -1384,10 +1469,11 @@ class RuntimeRunService:
     ) -> str | None:
         metadata = self.llm_provider.metadata()
         if not metadata.get("configured"):
+            await self._record_model_fallback(state, stage, "provider_unconfigured")
             return None
         if state.budget.model_calls_used >= state.budget.max_model_calls:
+            await self._record_model_fallback(state, stage, "model_budget_exhausted")
             return None
-        state.budget.model_calls_used += 1
         messages = [
             LLMMessage(role="system", content=system, metadata={"stage": stage}),
             LLMMessage(
@@ -1404,82 +1490,214 @@ class RuntimeRunService:
         if response_schema is not None:
             provider_kwargs["response_schema"] = response_schema
             provider_kwargs["json_mode"] = True
-        # Keep the existing usage API report-focused while preserving complete
-        # stage I/O in explicit graph audit events.
+        # Keep report usage in the provider ledger while preserving per-attempt
+        # stage I/O for every other graph model call.
         if stage == "report":
             provider_kwargs["run_id"] = state.run_id
             provider_kwargs["flow_id"] = state.flow_id
             provider_kwargs["task_id"] = state.task_id
-        else:
-            await self._event(
-                state,
-                f"model.{stage}.request",
-                {
-                    "messages": [item.model_dump(mode="json") for item in messages],
-                    "parameters": provider_kwargs,
-                },
-                actor="llm_provider",
-            )
-        try:
-            response = await self.llm_provider.complete(
-                messages,
-                **provider_kwargs,
-            )
-        except Exception as error:
+        max_attempts = min(
+            self.settings.llm_max_attempts,
+            state.budget.max_model_calls - state.budget.model_calls_used,
+        )
+        for attempt in range(1, max_attempts + 1):
+            state.budget.model_calls_used += 1
             if stage != "report":
-                diagnostics = error.diagnostics if isinstance(error, ProviderHTTPError) else None
                 await self._event(
                     state,
-                    f"model.{stage}.error",
+                    f"model.{stage}.request",
                     {
-                        "error_type": type(error).__name__,
-                        "error": safe_error_message(error),
-                        "diagnostics": diagnostics,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "messages": [item.model_dump(mode="json") for item in messages],
+                        "parameters": provider_kwargs,
                     },
                     actor="llm_provider",
                 )
-            state.decisions.append(
-                DecisionRecord(
-                    decision=f"model_{stage}_failed",
-                    rationale_summary=(
-                        f"Managed model call failed ({type(error).__name__}); fallback used."
-                    ),
-                    policy_ids=["MODEL-FALLBACK-V1"],
-                    model_id=str(metadata.get("model") or metadata.get("name") or "unknown"),
+            try:
+                response = await self.llm_provider.complete(
+                    messages,
+                    **provider_kwargs,
                 )
-            )
+            except Exception as error:
+                retryable = self._is_retryable_model_error(error)
+                if stage != "report":
+                    diagnostics = (
+                        error.diagnostics if isinstance(error, ProviderHTTPError) else None
+                    )
+                    await self._event(
+                        state,
+                        f"model.{stage}.error",
+                        {
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "retryable": retryable,
+                            "error_type": type(error).__name__,
+                            "error": safe_error_message(error),
+                            "diagnostics": diagnostics,
+                        },
+                        actor="llm_provider",
+                    )
+                if retryable and attempt < max_attempts:
+                    state.decisions.append(
+                        DecisionRecord(
+                            decision=f"retry_model_{stage}",
+                            rationale_summary=(
+                                f"Transient {type(error).__name__} triggered bounded retry "
+                                f"{attempt + 1} of {max_attempts}."
+                            ),
+                            policy_ids=["MODEL-BOUNDED-RETRY-V1"],
+                            model_id=str(
+                                metadata.get("model") or metadata.get("name") or "unknown"
+                            ),
+                        )
+                    )
+                    continue
+                await self._record_model_fallback(
+                    state,
+                    stage,
+                    f"{type(error).__name__}_after_{attempt}_attempts",
+                )
+                return None
+            if stage != "report":
+                await self._event(
+                    state,
+                    f"model.{stage}.response",
+                    {
+                        "attempt": attempt,
+                        "provider": response.provider,
+                        "model": response.model,
+                        "content": response.content,
+                        "raw": response.raw,
+                    },
+                    actor="llm_provider",
+                )
+            content = response.content.strip()
+            if content:
+                return content
+            await self._record_model_fallback(state, stage, "empty_response")
             return None
-        if stage != "report":
-            await self._event(
-                state,
-                f"model.{stage}.response",
-                {
-                    "provider": response.provider,
-                    "model": response.model,
-                    "content": response.content,
-                    "raw": response.raw,
-                },
-                actor="llm_provider",
+        await self._record_model_fallback(state, stage, "attempt_limit_exhausted")
+        return None
+
+    async def _record_model_fallback(
+        self,
+        state: AgentState,
+        stage: str,
+        reason: str,
+    ) -> None:
+        fallback_id = f"deterministic-{stage}-{reason.replace('_', '-')}-fallback"
+        state.decisions.append(
+            DecisionRecord(
+                decision=f"model_{stage}_fallback",
+                rationale_summary=f"Deterministic {stage} fallback selected: {reason}.",
+                policy_ids=["MODEL-FALLBACK-V1"],
+                model_id=fallback_id,
             )
-        return response.content.strip() or None
+        )
+        await self._event(
+            state,
+            f"model.{stage}.fallback",
+            {"reason": reason, "fallback_id": fallback_id},
+            actor="runtime",
+        )
+
+    @staticmethod
+    def _is_retryable_model_error(error: Exception) -> bool:
+        if isinstance(error, ProviderHTTPError):
+            return error.status_code in {408, 409, 425, 429} or error.status_code >= 500
+        return isinstance(error, (TimeoutError, ConnectionError))
 
     @staticmethod
     def _completion_mode(task: TaskRequest) -> CompletionMode:
-        text = " ".join([task.objective, *task.expected_outputs]).lower()
-        answer_terms = (
-            "final_answer",
-            "final answer",
-            "flag",
-            "solution",
-            "solve",
-            "\u7b54\u6848",
-            "\u89e3\u9898",
+        return resolve_task_contract(task).completion_mode
+
+    @staticmethod
+    def _expected_output_present(
+        state: AgentState,
+        output: str,
+        verified_findings: list[Finding],
+    ) -> bool:
+        key = output.strip().lower().replace("-", "_").replace(" ", "_")
+        if key in {"security_report", "report", "executive_summary"}:
+            return state.review_round > 0 and bool(state.decisions)
+        if key in {"finding", "findings", "vulnerabilities"}:
+            return bool(verified_findings)
+        if key in {"evidence", "evidence_records"}:
+            return bool(state.evidence)
+        if key in {"final_answer", "answer", "flag"}:
+            return bool(state.final_answer)
+        if key in {"reproduction_steps", "steps_to_reproduce", "reproduction"}:
+            return bool(state.reproduction_steps)
+        if key in {"decision_log", "decisions"}:
+            return bool(state.decisions)
+        if key in {"artifact", "artifacts"}:
+            return bool(state.artifact_refs or state.artifacts)
+        return any(
+            isinstance(result.get("data"), dict) and bool(result["data"].get(output))
+            for result in state.agent_results
         )
-        return (
-            CompletionMode.FINAL_ANSWER
-            if any(term in text for term in answer_terms)
-            else CompletionMode.FINDINGS
+
+    @staticmethod
+    def _required_evidence_present(
+        state: AgentState,
+        requirement: str,
+        verified_findings: list[Finding],
+    ) -> bool:
+        key = requirement.strip().lower().replace("-", "_").replace(" ", "_")
+        if key == "final_answer":
+            return bool(state.final_answer)
+        if key in {"independent_verification", "verified_final_answer"}:
+            return state.final_answer_verified and any(
+                item.final_answer_verified for item in state.verified_deltas
+            )
+        if key in {"verified_finding", "verified_findings"}:
+            return bool(verified_findings)
+        if key == "evidence":
+            return bool(state.evidence)
+        if key in {"evidence_reference", "evidence_references"}:
+            referenced = {
+                evidence_id
+                for item in state.verified_deltas
+                for evidence_id in item.evidence_ids
+            }
+            return bool(verified_findings) or bool(
+                referenced & {item.evidence_id for item in state.evidence}
+            )
+        if key in {"independent_review", "secondary_review"}:
+            return state.review_converged
+        if key in {"reproduction_steps", "reproduction"}:
+            return bool(state.reproduction_steps)
+        if key in {"artifact", "artifacts"}:
+            return bool(state.artifact_refs or state.artifacts)
+        return any(
+            requirement == item.evidence_id
+            or requirement == item.source
+            or requirement == str(item.metadata.get("kind") or "")
+            for item in state.evidence
         )
+
+    @staticmethod
+    def _evaluator_prerequisite_passed(
+        state: AgentState,
+        contract: TaskContract,
+        verified_findings: list[Finding],
+    ) -> bool:
+        if contract.evaluator == "evidence_backed_findings":
+            return bool(verified_findings) and state.review_converged
+        if contract.evaluator in {
+            "final_answer_independent_verification",
+            "cybench_final_answer_exact_match",
+            "nyu_flag_exact_match",
+        }:
+            return (
+                bool(state.final_answer)
+                and state.final_answer_verified
+                and any(item.final_answer_verified for item in state.verified_deltas)
+            )
+        if contract.evaluator == "manual_no_verified_evidence":
+            return False
+        return False
 
     @staticmethod
     def _finding_fingerprint(finding: Finding) -> str:
@@ -1694,6 +1912,12 @@ class RuntimeRunService:
         )
         if isinstance(answer, str) and not state.final_answer:
             state.final_answer = answer.strip()
+        raw_steps = data.get("reproduction_steps", data.get("steps_to_reproduce"))
+        steps = raw_steps if isinstance(raw_steps, list) else [raw_steps]
+        for item in steps:
+            step = str(item).strip() if item is not None else ""
+            if step and step not in state.reproduction_steps:
+                state.reproduction_steps.append(step)
         verified = False
         if allow_verification:
             verdict = data.get("verification_result", data.get("verdict"))
@@ -1706,6 +1930,62 @@ class RuntimeRunService:
                     state.final_answer_verified = True
                     verified = True
         return verified
+
+    @staticmethod
+    def _evidence_closure(
+        state: AgentState,
+        *,
+        require_verification: bool,
+    ) -> EvidenceClosureResult:
+        known_evidence = {item.evidence_id for item in state.evidence}
+        orphaned = sorted(item.finding_id for item in state.findings if not item.evidence_ids)
+        broken = {
+            item.finding_id: sorted(
+                reference for reference in item.evidence_ids if reference not in known_evidence
+            )
+            for item in state.findings
+            if any(reference not in known_evidence for reference in item.evidence_ids)
+        }
+        structurally_closed = {
+            item.finding_id: set(item.evidence_ids)
+            for item in state.findings
+            if item.evidence_ids and set(item.evidence_ids).issubset(known_evidence)
+        }
+        verified_findings: set[str] = set()
+        if require_verification:
+            for finding_id, evidence_ids in structurally_closed.items():
+                if any(
+                    finding_id in delta.finding_ids
+                    and evidence_ids.issubset(set(delta.evidence_ids))
+                    for delta in state.verified_deltas
+                ):
+                    verified_findings.add(finding_id)
+        else:
+            verified_findings = set(structurally_closed)
+        unverified_findings = sorted(set(structurally_closed) - verified_findings)
+        unverified_evidence = sorted(
+            {
+                evidence_id
+                for finding_id in unverified_findings
+                for evidence_id in structurally_closed[finding_id]
+            }
+        )
+        closed_evidence = sorted(
+            {
+                evidence_id
+                for finding_id in verified_findings
+                for evidence_id in structurally_closed[finding_id]
+            }
+        )
+        return EvidenceClosureResult(
+            passed=not orphaned and not broken and not unverified_findings,
+            orphaned_finding_ids=orphaned,
+            broken_references=broken,
+            unverified_finding_ids=unverified_findings,
+            unverified_evidence_ids=unverified_evidence,
+            closed_finding_ids=sorted(verified_findings),
+            closed_evidence_ids=closed_evidence,
+        )
 
     @staticmethod
     def _tool_outcome_status(status: ToolStatus) -> UnitOutcomeStatus:

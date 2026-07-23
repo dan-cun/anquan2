@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -83,6 +84,7 @@ class Settings(BaseSettings):
     llm_fallback_model: str | None = None
     llm_embedding_model: str = "text-embedding-v3"
     llm_timeout_seconds: float = 60.0
+    llm_max_attempts: int = Field(default=2, ge=1, le=5)
     llm_temperature: float = 0.2
     llm_thinking_enabled: bool = True
     llm_reasoning_effort: Literal["high", "max"] = "max"
@@ -101,7 +103,7 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=os.getenv("SECMIND_SETTINGS_ENV_FILE", ".env"),
         env_prefix="SECMIND_",
         case_sensitive=False,
         extra="ignore",

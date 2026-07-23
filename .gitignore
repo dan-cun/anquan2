@@ -6,6 +6,7 @@ venv/
 .env
 .env.*
 !.env.example
+!secmind/backend/.env.test
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -13,9 +14,19 @@ __pycache__/
 .ruff_cache/
 .cache/
 .local/
+.state/
+
+# Generated runtime databases and sidecar files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 
 # Local visual verification artifacts
 verify-*.png
+*-check.png
+/outputs/
 
 # SecMind backend runtime data
 data/

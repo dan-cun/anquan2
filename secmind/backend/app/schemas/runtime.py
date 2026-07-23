@@ -243,6 +243,21 @@ class CompletionMode(StrEnum):
     FINAL_ANSWER = "final_answer"
 
 
+class TaskContract(BaseModel):
+    """Deterministic, auditable completion contract derived from public task metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = SCHEMA_VERSION
+    completion_mode: CompletionMode
+    expected_outputs: list[str] = Field(min_length=1)
+    evaluator: str = Field(min_length=1, max_length=200)
+    required_evidence: list[str] = Field(min_length=1)
+    case_id: str | None = None
+    source: str | None = None
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class CapabilityStatus(StrEnum):
     READY = "ready"
     DEGRADED = "degraded"
@@ -278,6 +293,10 @@ class TaskRequest(BaseModel):
     target_scope: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=lambda: ["security_report"])
+    completion_mode: CompletionMode | None = None
+    evaluator: str | None = Field(default=None, min_length=1, max_length=200)
+    required_evidence: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     autonomy_policy: Literal["graded", "approval_all", "automatic"] = "graded"
 
     @field_validator("objective")
@@ -437,6 +456,20 @@ class Finding(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvidenceClosureResult(BaseModel):
+    """Deterministic proof that findings resolve to recorded, verified evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    passed: bool
+    orphaned_finding_ids: list[str] = Field(default_factory=list)
+    broken_references: dict[str, list[str]] = Field(default_factory=dict)
+    unverified_finding_ids: list[str] = Field(default_factory=list)
+    unverified_evidence_ids: list[str] = Field(default_factory=list)
+    closed_finding_ids: list[str] = Field(default_factory=list)
+    closed_evidence_ids: list[str] = Field(default_factory=list)
+
+
 class DecisionAlternative(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -544,10 +577,13 @@ class AgentReport(BaseModel):
     verified_deltas: list[VerificationDelta] = Field(default_factory=list)
     final_answer: str | None = None
     final_answer_verified: bool = False
+    reproduction_steps: list[str] = Field(default_factory=list)
+    task_contract: TaskContract | None = None
     completion_mode: CompletionMode = CompletionMode.FINDINGS
     review_rounds: int = 0
     review_converged: bool = False
     completion_gate_reason: str | None = None
+    completion_gate_checks: dict[str, bool] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -560,6 +596,7 @@ class AgentState(BaseModel):
     flow_id: str | None = None
     task_id: str | None = None
     task: TaskRequest
+    task_contract: TaskContract | None = None
     scenario: Scenario = Scenario.UNKNOWN
     classification_completed: bool = False
     status: RunStatus = RunStatus.PENDING
@@ -589,10 +626,12 @@ class AgentState(BaseModel):
     completion_mode: CompletionMode = CompletionMode.FINDINGS
     final_answer: str | None = None
     final_answer_verified: bool = False
+    reproduction_steps: list[str] = Field(default_factory=list)
     review_round: int = Field(default=0, ge=0)
     review_finding_fingerprints: list[str] = Field(default_factory=list)
     review_converged: bool = False
     completion_gate_reason: str | None = None
+    completion_gate_checks: dict[str, bool] = Field(default_factory=dict)
     decisions: list[DecisionRecord] = Field(default_factory=list)
     pending_approval: ApprovalRequest | None = None
     approvals: list[dict[str, Any]] = Field(default_factory=list)
@@ -669,11 +708,13 @@ class RunSummary(BaseModel):
     total_steps: int
     active_step_id: str | None = None
     verification_passed: bool | None = None
+    task_contract: TaskContract | None = None
     completion_mode: CompletionMode = CompletionMode.FINDINGS
     final_answer_verified: bool = False
     review_round: int = 0
     review_converged: bool = False
     completion_gate_reason: str | None = None
+    completion_gate_checks: dict[str, bool] = Field(default_factory=dict)
     state_revision: int = 0
     pending_approval: ApprovalRequest | None = None
     last_error: str | None = None

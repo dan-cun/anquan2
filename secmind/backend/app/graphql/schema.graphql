@@ -544,6 +544,12 @@ type Report {
   executiveSummary: String!
   findings: JSON!
   evidence: JSON!
+  finalAnswer: String
+  reproductionSteps: [String!]!
+  completionMode: String!
+  taskContract: JSON
+  completionGateChecks: JSON!
+  completionGateReason: String
   limitations: [String!]!
   generatedAt: DateTime!
 }

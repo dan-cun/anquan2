@@ -330,6 +330,14 @@ def report(model: AgentReport) -> types.Report:
         executive_summary=model.executive_summary,
         findings=[item.model_dump(mode="json") for item in model.findings],
         evidence=[item.model_dump(mode="json") for item in model.evidence],
+        final_answer=model.final_answer,
+        reproduction_steps=model.reproduction_steps,
+        completion_mode=model.completion_mode.value,
+        task_contract=(
+            model.task_contract.model_dump(mode="json") if model.task_contract else None
+        ),
+        completion_gate_checks=model.completion_gate_checks,
+        completion_gate_reason=model.completion_gate_reason,
         limitations=model.limitations,
         generated_at=model.generated_at,
     )

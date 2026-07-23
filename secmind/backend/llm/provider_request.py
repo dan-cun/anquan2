@@ -2,14 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
-class ProviderMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    role: str
-    content: str
+from app.schemas.provider import ProviderMessage, validate_provider_message_sequence
 
 
 class ProviderRequest(BaseModel):
@@ -41,5 +36,12 @@ class ProviderRequest(BaseModel):
     top_logprobs: int | None = None
     stream_options: dict[str, Any] | None = None
 
+    @model_validator(mode="after")
+    def validate_message_sequence(self) -> ProviderRequest:
+        validate_provider_message_sequence(self.messages)
+        return self
+
     def payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude_none=True)
+        payload = self.model_dump(mode="json", exclude_none=True, exclude={"messages"})
+        payload["messages"] = [message.provider_payload() for message in self.messages]
+        return payload
