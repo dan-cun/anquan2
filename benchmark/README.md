@@ -77,6 +77,22 @@ Re-render an existing evaluation without reopening private evaluator data:
 Runtime artifacts are written under `benchmark/.state/` and are intentionally ignored by Git.
 The API key is never read or persisted by this harness.
 
+### Prompt convergence gates
+
+The prompt diagnostics helper reads a JSONL ledger and writes only aggregate, non-sensitive
+measurements. It never exports message content, provider raw responses, or credentials:
+
+```powershell
+..\venv\Scripts\python.exe benchmark\prompt_diagnostics.py `
+  --ledger benchmark\.state\results\<experiment>\round-1\BB-01\ledger.jsonl `
+  --output benchmark\.state\prompt-diagnostics.json
+```
+
+The regression gate uses a 32,000-token maximum for one model request and a 100,000-token
+maximum for the complete run. The tests use synthetic 332-file, 275-finding, and 88-tool
+inputs; they do not require `.state/`, a running model, or a benchmark container. Full tool
+results and evidence remain audit data, while prompt inputs must use compact projections.
+
 ## PentAGI target adapter
 
 PentAGI can be used as the solver while this harness remains the private,
