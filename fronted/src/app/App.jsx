@@ -13,12 +13,10 @@ import {
   FileSearchOutlined,
   FileTextOutlined,
   HomeOutlined,
-  MessageOutlined,
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
-  SendOutlined,
   StopOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
@@ -49,6 +47,7 @@ import {
   listFlows,
   listLedgerAnchors,
   listLedgerEntries,
+  uploadFile,
   verifyLedger,
 } from './api.js'
 import {
@@ -63,6 +62,8 @@ import { ControlStarfield } from './ControlStarfield.jsx'
 import { AgentGraphControls } from './features/agentGraph/AgentGraphControls.jsx'
 import { LiveFeed } from './LiveFeed.jsx'
 import { projectLiveFeedEvent } from './liveFeed.js'
+import { TaskSubmissionModal } from './TaskSubmissionModal.jsx'
+import { buildTaskMetadata } from './taskSubmission.js'
 import { flowStatusFromEvent, toConversationItem } from './conversationEvents.js'
 import {
   buildFlowWebSocketUrl,
@@ -266,9 +267,9 @@ function WorkbenchPage() {
   const [nativeNetwork, setNativeNetwork] = useState(null)
   const [events, setEvents] = useState([])
   const [ledgerEntries, setLedgerEntries] = useState([])
-  const [draft, setDraft] = useState('')
   const [connectionStatus, setConnectionStatus] = useState('idle')
-  const [isSending, setIsSending] = useState(false)
+  const [taskModalOpen, setTaskModalOpen] = useState(false)
+  const [submissionProgress, setSubmissionProgress] = useState('')
   const [lastStage, setLastStage] = useState('等待任务')
   const [centerView, setCenterView] = useState('feed')
 
@@ -280,7 +281,10 @@ function WorkbenchPage() {
 
   const queueOrSend = useCallback((envelope) => {
     const socket = socketRef.current
-    if (socket?.readyState === WebSocket.OPEN) {
+    if (
+      socket?.readyState === WebSocket.OPEN
+      && activeFlowIdRef.current === envelope.flow_id
+    ) {
       socket.send(JSON.stringify(envelope))
       return
     }
@@ -491,53 +495,50 @@ function WorkbenchPage() {
     }
   }, [activeFlow?.id, handleSocketEvent, openApprovalModal])
 
-  async function handleCreateFlow() {
+  async function handleSubmitTask({
+    objective,
+    authorizationScope,
+    constraints,
+    autonomyPolicy,
+    files,
+  }) {
+    setSubmissionProgress(files.length ? `上传材料 0 / ${files.length}` : '创建任务')
     try {
-      const flow = await createFlow({ title: '新建安全分析流程' })
+      const uploads = []
+      for (const [index, file] of files.entries()) {
+        setSubmissionProgress(`上传材料 ${index + 1} / ${files.length}`)
+        uploads.push(await uploadFile(file))
+      }
+      setSubmissionProgress('创建任务')
+      const flow = await createFlow({
+        title: objective.slice(0, 48),
+        initial_input: objective,
+      })
       setFlows((current) => [flow, ...current.filter((item) => item.id !== flow.id)])
       setActiveFlow(flow)
-      setLastStage('等待任务')
-    } catch (error) {
-      message.error(`创建流程失败：${error.message}`)
-    }
-  }
-
-  async function handleSend() {
-    const content = draft.trim()
-    if (!content || isSending) return
-    setIsSending(true)
-    try {
-      let flow = activeFlow
-      if (!flow) {
-        flow = await createFlow({ title: content.slice(0, 48), initial_input: content })
-        setFlows((current) => [flow, ...current.filter((item) => item.id !== flow.id)])
-        setActiveFlow(flow)
-      }
-      appendEvent({
-        type: 'client.user_message',
-        flow_id: flow.id,
-        request_id: makeRequestId(),
-        timestamp: new Date().toISOString(),
-        payload: { content },
-      })
-      setDraft('')
+      setCenterView('feed')
       setLastStage('提交任务')
       queueOrSend({
         type: 'client.user_message',
         flow_id: flow.id,
         request_id: makeRequestId(),
         payload: {
-          content,
-          metadata: {
-            source: 'fronted.workbench',
-            submitted_at: new Date().toISOString(),
-          },
+          content: objective,
+          metadata: buildTaskMetadata({
+            uploads,
+            authorizationScope,
+            constraints,
+            autonomyPolicy,
+          }),
         },
       })
+      setTaskModalOpen(false)
+      message.success('任务已提交')
     } catch (error) {
-      message.error(`发送失败：${error.message}`)
+      message.error(`任务提交失败：${error.message}`)
+      throw error
     } finally {
-      setIsSending(false)
+      setSubmissionProgress('')
     }
   }
 
@@ -559,6 +560,12 @@ function WorkbenchPage() {
   return (
     <div className="workbench-grid">
       {contextHolder}
+      <TaskSubmissionModal
+        open={taskModalOpen}
+        progress={submissionProgress}
+        onCancel={() => setTaskModalOpen(false)}
+        onSubmit={handleSubmitTask}
+      />
       <aside className="session-panel app-panel">
         <div className="panel-heading">
           <div>
@@ -569,8 +576,8 @@ function WorkbenchPage() {
             <Button type="text" icon={<ReloadOutlined />} aria-label="刷新流程" onClick={refreshFlows} />
           </Tooltip>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} block onClick={handleCreateFlow}>
-          新建流程
+        <Button type="primary" icon={<PlusOutlined />} block onClick={() => setTaskModalOpen(true)}>
+          新建任务
         </Button>
         <div className="session-list">
           {flows.length === 0 ? (
@@ -599,13 +606,22 @@ function WorkbenchPage() {
             <Title level={4}>{activeFlow?.title || '选择或创建流程'}</Title>
           </div>
           <Space size={6} wrap>
+            <Button
+              className="task-new-button"
+              size="small"
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => setTaskModalOpen(true)}
+            >
+              新建任务
+            </Button>
             <Segmented
               size="small"
               value={centerView}
               onChange={setCenterView}
               options={[
                 { value: 'feed', label: '实时步骤', icon: <AuditOutlined /> },
-                { value: 'conversation', label: '对话', icon: <MessageOutlined /> },
+                { value: 'result', label: '任务结果', icon: <FileTextOutlined /> },
               ]}
               aria-label="工作台中心视图"
             />
@@ -644,8 +660,7 @@ function WorkbenchPage() {
             {conversationItems.length === 0 ? (
               <div className="empty-workbench">
                 <RobotOutlined />
-                <Title level={4}>提交一个授权范围内的安全任务</Title>
-                <Text type="secondary">运行进度、角色协作与证据事件会在此实时显示。</Text>
+                <Title level={4}>暂无任务结果</Title>
               </div>
             ) : (
               <div className="event-stream">
@@ -673,30 +688,6 @@ function WorkbenchPage() {
           </div>
         )}
 
-        <div className="composer">
-          <Input.TextArea
-            autoSize={{ minRows: 2, maxRows: 6 }}
-            placeholder="描述安全分析目标、授权范围、约束和期望输出"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onPressEnter={(event) => {
-              if (!event.shiftKey) {
-                event.preventDefault()
-                handleSend()
-              }
-            }}
-            aria-label="任务内容"
-          />
-          <Tooltip title="发送任务">
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              loading={isSending}
-              onClick={handleSend}
-              aria-label="发送任务"
-            />
-          </Tooltip>
-        </div>
       </section>
 
       <aside className="inspector-panel app-panel">

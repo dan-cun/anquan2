@@ -53,6 +53,26 @@ export function createFlow(payload) {
   })
 }
 
+export async function uploadFile(file) {
+  const body = new FormData()
+  body.append('file', file, file.name)
+  const response = await fetch(`${API_BASE_URL}/api/v1/uploads`, {
+    method: 'POST',
+    body,
+  })
+  if (!response.ok) {
+    const raw = await response.text()
+    let detail = raw
+    try {
+      detail = JSON.parse(raw).detail || raw
+    } catch {
+      // Keep non-JSON upload errors readable.
+    }
+    throw new Error(detail || `Upload failed with ${response.status}`)
+  }
+  return response.json()
+}
+
 export function listLedgerEntries(flowId, { afterSequence = 0 } = {}) {
   const query = new URLSearchParams()
   if (afterSequence > 0) {

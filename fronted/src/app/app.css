@@ -31,7 +31,7 @@ textarea {
   position: relative;
   isolation: isolate;
   min-height: 100vh;
-  background: #0f1113;
+  background: #0c0f11;
 }
 
 .control-starfield {
@@ -41,7 +41,7 @@ textarea {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  opacity: 0.62;
+  opacity: 0.96;
 }
 
 .feature-shell > .app-sider,
@@ -150,7 +150,7 @@ textarea {
   min-width: 0;
   height: calc(100vh - 54px);
   overflow: hidden;
-  background: rgba(16, 19, 21, 0.36);
+  background: rgba(10, 13, 15, 0.14);
 }
 
 .app-panel {
@@ -158,7 +158,7 @@ textarea {
   overflow: hidden;
   border: 1px solid #2b3034;
   border-radius: 6px;
-  background: rgba(24, 28, 31, 0.88);
+  background: rgba(22, 26, 29, 0.72);
   backdrop-filter: blur(4px);
 }
 
@@ -271,7 +271,7 @@ textarea {
 
 .conversation-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .conversation-heading,
@@ -735,19 +735,48 @@ textarea {
   padding-left: 17px;
 }
 
-.composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px;
-  gap: 8px;
-  align-items: end;
-  padding: 10px;
-  border-top: 1px solid #292e32;
-  background: #181c1f;
+.task-submission-modal .ant-modal-body {
+  max-height: min(680px, calc(100vh - 170px));
+  overflow-y: auto;
 }
 
-.composer .ant-btn {
-  width: 40px;
-  height: 40px;
+.task-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(220px, 0.85fr);
+  gap: 14px;
+}
+
+.task-form-side {
+  min-width: 0;
+}
+
+.task-upload-field .ant-upload-drag {
+  min-height: 104px;
+}
+
+.task-upload-field .ant-upload-btn {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 104px;
+  padding: 16px !important;
+}
+
+.task-upload-field .ant-upload-drag-icon {
+  margin: 0 !important;
+}
+
+.task-upload-field .anticon-inbox {
+  color: #40b8d8;
+  font-size: 26px;
+}
+
+.task-submit-progress {
+  min-height: 24px;
+  margin-bottom: 10px;
+  color: #79cfe8;
+  font-size: 12px;
 }
 
 .inspector-panel {
@@ -1449,6 +1478,19 @@ textarea {
 
   .conversation-heading .audit-open-button {
     display: none;
+  }
+
+  .task-form-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .task-submission-modal {
+    top: 12px;
+  }
+
+  .task-submission-modal .ant-modal-body {
+    max-height: calc(100vh - 150px);
   }
 
   .live-feed-toolbar {
