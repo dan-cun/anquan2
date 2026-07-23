@@ -36,7 +36,10 @@ def parse_structured_output(
     content, finish_reason, empty_reason = _response_fields(response)
     cleaned, source_format = _clean_json_document(content)
     if not cleaned:
-        retryable = empty_reason == EmptyContentReason.LENGTH_REASONING_ONLY
+        retryable = empty_reason in {
+            EmptyContentReason.LENGTH_REASONING_ONLY,
+            EmptyContentReason.REASONING_ONLY,
+        }
         raise StructuredOutputError(
             "Structured model response is empty",
             StructuredOutputDiagnostics(

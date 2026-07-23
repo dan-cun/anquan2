@@ -64,7 +64,10 @@ class LLMResponse(BaseModel):
 
     @property
     def should_retry_without_thinking(self) -> bool:
-        return self.empty_content_reason == EmptyContentReason.LENGTH_REASONING_ONLY
+        return self.empty_content_reason in {
+            EmptyContentReason.LENGTH_REASONING_ONLY,
+            EmptyContentReason.REASONING_ONLY,
+        }
 
 
 class ProviderHTTPError(RuntimeError):

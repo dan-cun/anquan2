@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
+from pydantic import ValidationError
 
 from agents.guardrail import Guardrail
 from app.core.config import Settings
@@ -35,6 +36,16 @@ from app.services.runtime import RuntimeEventHub, RuntimeRunService
 from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import EmptyContentReason, LLMResponse, ProviderHTTPError
 from tools.runtime import RuntimeTool, RuntimeToolBroker, RuntimeToolRegistry
+
+
+def test_plan_step_requires_an_executable_tool_candidate() -> None:
+    with pytest.raises(ValidationError, match="tool_candidates"):
+        PlanStep(
+            step_id="analysis-only",
+            objective="Analyze a previous tool result without an executable action.",
+            agent_role="security_analyst",
+            tool_candidates=[],
+        )
 
 
 class ControlledModelManager:

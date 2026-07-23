@@ -429,7 +429,7 @@ class PlanStep(BaseModel):
     objective: str
     agent_role: str
     dependencies: list[str] = Field(default_factory=list)
-    tool_candidates: list[str] = Field(default_factory=list)
+    tool_candidates: list[str] = Field(default_factory=list, min_length=1)
     inputs: dict[str, Any] = Field(default_factory=dict)
     success_criteria: list[str] = Field(default_factory=list)
     risk_hint: RiskLevel = RiskLevel.R0

@@ -157,6 +157,24 @@ def test_reasoning_only_truncation_provides_bounded_retry_advice():
     assert diagnostics.suggested_overrides == {"thinking_enabled": False}
 
 
+def test_reasoning_only_stop_provides_bounded_retry_advice():
+    response = LLMResponse(
+        content=" ",
+        model="deepseek-v4-flash",
+        provider="deepseek",
+        finish_reason="stop",
+        empty_content_reason=EmptyContentReason.REASONING_ONLY,
+    )
+
+    with pytest.raises(StructuredOutputError) as captured:
+        parse_structured_output(response, ResultSchema)
+
+    diagnostics = captured.value.diagnostics
+    assert response.should_retry_without_thinking is True
+    assert diagnostics.retryable is True
+    assert diagnostics.suggested_overrides == {"thinking_enabled": False}
+
+
 @pytest.mark.asyncio
 async def test_ledger_records_normalized_response_diagnostics(tmp_path):
     class StaticProvider(OpenAICompatibleProvider):

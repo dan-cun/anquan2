@@ -23,7 +23,7 @@ from app.schemas.tools import (
     UnifiedToolInvocation,
     UnifiedToolResult,
 )
-from llm.base import LLMMessage, LLMProvider, LLMResponse
+from llm.base import EmptyContentReason, LLMMessage, LLMProvider, LLMResponse
 
 
 class ParentGraphState(TypedDict, total=False):
@@ -38,19 +38,24 @@ def action(action_type: str, **values: Any) -> str:
 class ScriptedModel(LLMProvider):
     name = "scripted"
 
-    def __init__(self, scripts: dict[AgentRole, list[str]]) -> None:
+    def __init__(self, scripts: dict[AgentRole, list[str | LLMResponse]]) -> None:
         self.scripts = {role: deque(items) for role, items in scripts.items()}
         self.calls: list[AgentRole] = []
         self.message_snapshots: list[list[LLMMessage]] = []
+        self.request_kwargs: list[dict[str, Any]] = []
 
     async def complete(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
         role = AgentRole(str(kwargs["stage"]).removeprefix("agent."))
         self.calls.append(role)
         self.message_snapshots.append(messages)
+        self.request_kwargs.append(kwargs.copy())
         if not self.scripts[role]:
             raise AssertionError(f"No scripted response remains for {role.value}")
+        scripted = self.scripts[role].popleft()
+        if isinstance(scripted, LLMResponse):
+            return scripted
         return LLMResponse(
-            content=self.scripts[role].popleft(),
+            content=scripted,
             model=f"model-{kwargs['model_profile']}",
             provider=self.name,
         )
@@ -583,3 +588,41 @@ async def test_invalid_actions_fail_after_bounded_reflection() -> None:
         "repair_attempts_used",
     }
     assert "invalid one" not in json.dumps(invalid_event[1])
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_action_retries_without_thinking_before_fixer() -> None:
+    model = ScriptedModel(
+        {
+            AgentRole.PRIMARY_AGENT: [
+                LLMResponse(
+                    content=" ",
+                    model="scripted-model",
+                    provider="scripted",
+                    empty_content_reason=EmptyContentReason.REASONING_ONLY,
+                ),
+                action("complete", summary="Recovered after disabling thinking"),
+            ]
+        }
+    )
+    registry = build_native_agent_registry(
+        model=model,
+        prompts=StaticPromptResolver(),
+        max_iterations=3,
+    )
+    dispatcher = AgentDispatcher(registry=registry)
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.PRIMARY_AGENT,
+        AgentTask(run_id="run-reasoning-only", flow_id="flow-reasoning-only", objective="Do work"),
+    )
+
+    assert result.status == AgentStatus.COMPLETED, (
+        result.error_code,
+        result.error_message,
+        model.calls,
+        model.request_kwargs,
+    )
+    assert model.calls == [AgentRole.PRIMARY_AGENT, AgentRole.PRIMARY_AGENT]
+    assert "thinking_enabled" not in model.request_kwargs[0]
+    assert model.request_kwargs[1]["thinking_enabled"] is False

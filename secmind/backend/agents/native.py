@@ -489,6 +489,7 @@ class ModelNativeAgent(NativeAgent):
         )
 
         action_repair_attempts = 0
+        retry_without_thinking = False
         loop_guard = AgentLoopGuard(self.loop_guard_config)
         for iteration in range(1, self.max_iterations + 1):
             if context.stop_requested():
@@ -511,18 +512,20 @@ class ModelNativeAgent(NativeAgent):
                     },
                 ),
             )
-            response = await self.model.complete(
-                request_messages,
-                stage=f"agent.{self.descriptor.role.value}",
-                model_profile=self.descriptor.model_profile,
-                run_id=context.task.run_id,
-                flow_id=context.task.flow_id,
-                agent_instance_id=context.instance.instance_id,
-                task_id=context.task.task_id,
-                iteration=iteration,
-                response_schema=AgentAction.model_json_schema(),
-                json_mode=True,
-            )
+            request_kwargs = {
+                "stage": f"agent.{self.descriptor.role.value}",
+                "model_profile": self.descriptor.model_profile,
+                "run_id": context.task.run_id,
+                "flow_id": context.task.flow_id,
+                "agent_instance_id": context.instance.instance_id,
+                "task_id": context.task.task_id,
+                "iteration": iteration,
+                "response_schema": AgentAction.model_json_schema(),
+                "json_mode": True,
+            }
+            if retry_without_thinking:
+                request_kwargs["thinking_enabled"] = False
+            response = await self.model.complete(request_messages, **request_kwargs)
             context.chain.append(
                 "assistant",
                 response.content,
@@ -533,6 +536,29 @@ class ModelNativeAgent(NativeAgent):
             )
             if context.stop_requested():
                 return self._cancelled(context)
+            if response.should_retry_without_thinking and not retry_without_thinking:
+                response_sha256 = hashlib.sha256(response.content.encode("utf-8")).hexdigest()
+                await context.publish_runtime_event(
+                    "agent.action_invalid",
+                    {
+                        "response_sha256": response_sha256,
+                        "diagnostic": str(response.empty_content_reason),
+                        "repair_attempts_used": action_repair_attempts,
+                    },
+                )
+                context.chain.append_observation(
+                    _policy_observation(
+                        source_id=f"action-retry:{response_sha256}",
+                        summary=(
+                            "Model returned reasoning without an Action; retrying once "
+                            "with thinking disabled."
+                        ),
+                        terminal=False,
+                    )
+                )
+                retry_without_thinking = True
+                continue
+            retry_without_thinking = False
             try:
                 action = parse_agent_action(response.content)
             except AgentActionError as error:
