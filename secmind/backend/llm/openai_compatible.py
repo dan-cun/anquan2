@@ -8,7 +8,14 @@ from urllib.parse import urlparse
 from pydantic import ValidationError
 
 from app.schemas.provider import ProviderMessage, ProviderToolCall
-from llm.base import LLMMessage, LLMProvider, LLMResponse, ProviderHTTPError
+from llm.base import (
+    LLMMessage,
+    LLMProvider,
+    LLMResponse,
+    LLMUsage,
+    ProviderHTTPError,
+    empty_content_reason,
+)
 from llm.http_client import create_http_client
 from llm.provider_request import ProviderRequest
 from tools.safety import redact_tool_value, safe_error_message
@@ -76,6 +83,8 @@ class OpenAICompatibleProvider(LLMProvider):
         temperature = kwargs.pop("temperature", self.temperature)
         response_schema = kwargs.pop("response_schema", None)
         json_mode = bool(kwargs.pop("json_mode", response_schema is not None))
+        thinking_enabled = bool(kwargs.pop("thinking_enabled", self.thinking_enabled))
+        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
         request_values: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -92,9 +101,10 @@ class OpenAICompatibleProvider(LLMProvider):
             if self.name == "deepseek":
                 request_values["response_format"] = {"type": "json_object"}
                 request_values["thinking"] = {
-                    "type": "enabled" if self.thinking_enabled else "disabled"
+                    "type": "enabled" if thinking_enabled else "disabled"
                 }
-                request_values["reasoning_effort"] = self.reasoning_effort
+                if thinking_enabled and reasoning_effort:
+                    request_values["reasoning_effort"] = str(reasoning_effort)
                 if isinstance(response_schema, dict):
                     schema_text = json.dumps(
                         response_schema,
@@ -155,11 +165,22 @@ class OpenAICompatibleProvider(LLMProvider):
         tool_calls = [
             ProviderToolCall.model_validate(item) for item in message.get("tool_calls") or []
         ]
+        content = str(message.get("content") or "")
+        finish_reason = str(choice.get("finish_reason")) if choice.get("finish_reason") else None
+        reasoning_content = str(message.get("reasoning_content") or "")
         return LLMResponse(
-            content=str(message.get("content") or ""),
+            content=content,
             model=str(raw.get("model", payload["model"])),
             provider=self.name,
             tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=LLMUsage.from_provider(raw.get("usage")),
+            empty_content_reason=empty_content_reason(
+                content=content,
+                finish_reason=finish_reason,
+                reasoning_content=reasoning_content,
+                has_tool_calls=bool(tool_calls),
+            ),
             raw=raw,
         )
 
