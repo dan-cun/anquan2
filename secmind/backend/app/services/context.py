@@ -282,6 +282,7 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
     agent_registry = build_native_agent_registry(
         model=native_model,
         prompts=prompt_registry,
+        max_action_repair_attempts=settings.agent_max_action_repair_attempts,
     )
     metadata = native_model.metadata()
     chain_store: MessageChainStore = PersistentMessageChainStore(
@@ -321,6 +322,12 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
     async def run_native_collaboration(state: Any, review_round: int) -> dict[str, Any]:
         role = AgentRole.REFLECTOR if review_round == 2 else AgentRole.ASSISTANT
         workspace_refs = workspace_resolver.context_refs(state.run_id)
+        tool_gateway.restore_run_circuit_state(
+            state.run_id,
+            opened_circuit_keys=state.opened_circuit_keys,
+            unavailable_server_ids=state.unavailable_server_ids,
+            unavailable_tool_ids=state.unavailable_tool_ids,
+        )
         agent_dispatcher.configure_run(
             state.run_id,
             max_agents=state.budget.max_agents,
@@ -348,7 +355,9 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
                 },
                 role=role,
             )
-            return collaboration.collect_run_products(state.run_id, result)
+            bundle = collaboration.collect_run_products(state.run_id, result)
+            bundle["circuit_state"] = tool_gateway.run_circuit_state(state.run_id)
+            return bundle
         except asyncio.CancelledError:
             await agent_dispatcher.cancel_run(
                 state.run_id,

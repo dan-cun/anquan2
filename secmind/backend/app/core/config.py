@@ -70,6 +70,7 @@ class Settings(BaseSettings):
 
     agent_max_parallel: int = Field(default=8, ge=1, le=128)
     agent_max_delegation_depth: int = Field(default=12, ge=1, le=100)
+    agent_max_action_repair_attempts: int = Field(default=1, ge=0, le=3)
 
     mcp_config_file: Path | None = None
     mcp_connect_timeout_seconds: float = Field(default=30.0, gt=0, le=600)

@@ -24,6 +24,7 @@ from app.schemas.runtime import (
     ApprovalResponse,
     BudgetState,
     CapabilityStatus,
+    CompletionGateResult,
     CompletionMode,
     DecisionRecord,
     EventContext,
@@ -279,6 +280,8 @@ class RuntimeRunService:
             total_steps=len(state.plan),
             active_step_id=state.active_step_id,
             verification_passed=state.verification_passed,
+            verification_attempted=state.verification_attempted,
+            verification_completed=state.verification_completed,
             task_contract=state.task_contract,
             completion_mode=state.completion_mode,
             final_answer_verified=state.final_answer_verified,
@@ -286,6 +289,12 @@ class RuntimeRunService:
             review_converged=state.review_converged,
             completion_gate_reason=state.completion_gate_reason,
             completion_gate_checks=state.completion_gate_checks,
+            completion_gate_passed=state.completion_gate_passed,
+            completion_gate_result=state.completion_gate_result,
+            final_answer_evidence_ids=state.final_answer_evidence_ids,
+            opened_circuit_keys=state.opened_circuit_keys,
+            unavailable_server_ids=state.unavailable_server_ids,
+            unavailable_tool_ids=state.unavailable_tool_ids,
             complexity_profile=state.budget.complexity_profile,
             soft_deadline_at=state.soft_deadline_at,
             hard_deadline_at=state.hard_deadline_at,
@@ -529,6 +538,7 @@ class RuntimeRunService:
             state.input_artifacts,
             self._tool_catalog_provider(),
             state.completion_mode,
+            unavailable_tool_ids=set(state.unavailable_tool_ids),
         )
         profile = self._explicit_complexity_profile(state.task) or self._classify_complexity(
             state
@@ -701,6 +711,11 @@ class RuntimeRunService:
                 "evidence_count": len(state.evidence),
                 "tool_call_count": len(state.tool_calls),
                 "runtime_profile": self._runtime_profile_payload(state),
+                "circuit_state": {
+                    "opened_circuit_keys": state.opened_circuit_keys,
+                    "unavailable_server_ids": state.unavailable_server_ids,
+                    "unavailable_tool_ids": state.unavailable_tool_ids,
+                },
                 "error": state.last_error,
             },
         )
@@ -1181,6 +1196,7 @@ class RuntimeRunService:
         )
 
     async def node_verify(self, state: AgentState) -> tuple[AgentState, str]:
+        state.verification_attempted = True
         step = state.plan[state.current_step_index]
         latest = state.observations[-1]
         closure = self._evidence_closure(state, require_verification=False)
@@ -1199,6 +1215,7 @@ class RuntimeRunService:
             },
             max_tokens=250,
         )
+        state.verification_completed = True
         state.verification_passed = deterministic_pass
         verified_finding_ids = closure.closed_finding_ids
         self._record_receipt(
@@ -1353,14 +1370,16 @@ class RuntimeRunService:
             for item in state.findings
             if item.finding_id in verified_finding_ids
         ]
+        evaluator_ready = self._evaluator_prerequisite_passed(
+            state,
+            contract,
+            verified_findings,
+        )
         checks: dict[str, bool] = {
+            "verification_attempted": state.verification_attempted,
+            "verification_completed": state.verification_completed,
+            "verification_passed": state.verification_passed is True,
             "review_converged": state.review_converged,
-            "evidence_closure": closure.passed,
-            f"evaluator:{contract.evaluator}": self._evaluator_prerequisite_passed(
-                state,
-                contract,
-                verified_findings,
-            ),
         }
         checks.update(
             {
@@ -1382,6 +1401,13 @@ class RuntimeRunService:
                 for item in contract.required_evidence
             }
         )
+        checks["evidence_closure"] = closure.passed
+        if contract.completion_mode == CompletionMode.FINAL_ANSWER:
+            checks["final_answer_evidence_closure"] = self._final_answer_evidence_closed(state)
+            checks["final_answer_independent_verification"] = (
+                self._final_answer_verification_ready(state)
+            )
+        checks[f"evaluator:{contract.evaluator}"] = evaluator_ready
         failed_outputs = [
             key.removeprefix("output:")
             for key, value in checks.items()
@@ -1392,43 +1418,67 @@ class RuntimeRunService:
             for key, value in checks.items()
             if key.startswith("evidence:") and not value
         ]
-        evaluator_passed = checks[f"evaluator:{contract.evaluator}"]
-        if not state.review_converged:
+        if not state.verification_attempted:
+            passed = False
+            reason = "Verify stage was not attempted"
+        elif not state.verification_completed:
+            passed = False
+            reason = "Verify stage did not complete"
+        elif state.verification_passed is not True:
+            passed = False
+            reason = "Verify stage did not pass"
+        elif not state.review_converged:
             passed = False
             reason = "Secondary review did not converge without new findings"
+        elif failed_outputs:
+            passed = False
+            reason = "Task contract missing expected output(s): " + ", ".join(failed_outputs)
+        elif failed_evidence:
+            passed = False
+            reason = "Task contract missing required evidence: " + ", ".join(failed_evidence)
         elif not closure.passed:
             passed = False
             reason = "Evidence reference closure was not satisfied"
-        elif state.completion_mode == CompletionMode.FINDINGS:
-            passed = bool(verified_findings)
-            reason = (
-                f"Completion gate passed with {len(verified_findings)} verified finding(s)"
-                if passed
-                else "Finding task requires at least one finding backed by recorded evidence"
-            )
-        else:
-            passed = bool(state.final_answer and state.final_answer_verified)
-            reason = (
-                "Completion gate passed with a verified final answer"
-                if passed
-                else (
-                    "Answer task requires both a final answer and an independent "
-                    "verification result"
-                )
-            )
-        if passed and failed_outputs:
+        elif (
+            contract.completion_mode == CompletionMode.FINAL_ANSWER
+            and not self._final_answer_evidence_closed(state)
+        ):
             passed = False
-            reason = "Task contract missing expected output(s): " + ", ".join(failed_outputs)
-        if passed and failed_evidence:
+            reason = "Final answer does not reference recorded evidence"
+        elif (
+            contract.completion_mode == CompletionMode.FINAL_ANSWER
+            and not self._final_answer_verification_ready(state)
+        ):
             passed = False
-            reason = "Task contract missing required evidence: " + ", ".join(failed_evidence)
-        if passed and not evaluator_passed:
+            reason = "Final answer lacks independent verification over the same evidence"
+        elif not evaluator_ready:
             passed = False
             reason = f"Task evaluator prerequisite was not satisfied: {contract.evaluator}"
-        passed = passed and all(checks.values())
-        state.verification_passed = passed
+        elif contract.completion_mode == CompletionMode.FINDINGS and not verified_findings:
+            passed = False
+            reason = "Finding task requires at least one finding backed by recorded evidence"
+        else:
+            passed = all(checks.values())
+            reason = (
+                f"Completion gate passed with {len(verified_findings)} verified finding(s)"
+                if contract.completion_mode == CompletionMode.FINDINGS
+                else "Completion gate passed with an independently verified final answer"
+            )
+        state.completion_gate_passed = passed
         state.completion_gate_reason = reason
         state.completion_gate_checks = checks
+        state.completion_gate_result = CompletionGateResult(
+            passed=passed,
+            checks=checks,
+            reason=reason,
+            verified_finding_ids=sorted(verified_finding_ids),
+            verified_evidence_ids=(
+                sorted(state.final_answer_evidence_ids)
+                if contract.completion_mode == CompletionMode.FINAL_ANSWER
+                else closure.closed_evidence_ids
+            ),
+            evaluator_ready=evaluator_ready,
+        )
         if not passed and state.status not in {RunStatus.DENIED, RunStatus.FAILED}:
             state.status = RunStatus.PARTIAL
             state.last_error = reason
@@ -1446,6 +1496,7 @@ class RuntimeRunService:
                 "final_answer_verified": state.final_answer_verified,
                 "review_converged": state.review_converged,
                 "reason": reason,
+                "result": state.completion_gate_result.model_dump(mode="json"),
             },
         )
 
@@ -1476,7 +1527,7 @@ class RuntimeRunService:
             final_status = state.status
         elif state.hard_deadline_reached:
             final_status = RunStatus.PARTIAL
-        elif state.verification_passed is True and state.review_converged:
+        elif state.completion_gate_passed is True:
             final_status = RunStatus.COMPLETED
         else:
             final_status = RunStatus.PARTIAL
@@ -1552,6 +1603,11 @@ class RuntimeRunService:
             review_converged=state.review_converged,
             completion_gate_reason=state.completion_gate_reason,
             completion_gate_checks=state.completion_gate_checks,
+            completion_gate_passed=state.completion_gate_passed,
+            completion_gate_result=state.completion_gate_result,
+            verification_attempted=state.verification_attempted,
+            verification_completed=state.verification_completed,
+            final_answer_evidence_ids=state.final_answer_evidence_ids,
             limitations=limitations,
         )
         if self._task_finalizer is not None and state.task_id is not None:
@@ -1993,19 +2049,17 @@ class RuntimeRunService:
             for result in state.agent_results
         )
 
-    @staticmethod
     def _required_evidence_present(
+        self,
         state: AgentState,
         requirement: str,
         verified_findings: list[Finding],
     ) -> bool:
         key = requirement.strip().lower().replace("-", "_").replace(" ", "_")
         if key == "final_answer":
-            return bool(state.final_answer)
+            return bool(state.final_answer) and self._final_answer_evidence_closed(state)
         if key in {"independent_verification", "verified_final_answer"}:
-            return state.final_answer_verified and any(
-                item.final_answer_verified for item in state.verified_deltas
-            )
+            return self._final_answer_verification_ready(state)
         if key in {"verified_finding", "verified_findings"}:
             return bool(verified_findings)
         if key == "evidence":
@@ -2032,8 +2086,8 @@ class RuntimeRunService:
             for item in state.evidence
         )
 
-    @staticmethod
     def _evaluator_prerequisite_passed(
+        self,
         state: AgentState,
         contract: TaskContract,
         verified_findings: list[Finding],
@@ -2045,14 +2099,30 @@ class RuntimeRunService:
             "cybench_final_answer_exact_match",
             "nyu_flag_exact_match",
         }:
-            return (
-                bool(state.final_answer)
-                and state.final_answer_verified
-                and any(item.final_answer_verified for item in state.verified_deltas)
-            )
+            return self._final_answer_verification_ready(state)
         if contract.evaluator == "manual_no_verified_evidence":
             return False
         return False
+
+    @staticmethod
+    def _final_answer_evidence_closed(state: AgentState) -> bool:
+        known = {item.evidence_id for item in state.evidence}
+        return bool(state.final_answer and state.final_answer_evidence_ids) and set(
+            state.final_answer_evidence_ids
+        ).issubset(known)
+
+    @staticmethod
+    def _final_answer_verification_ready(state: AgentState) -> bool:
+        if not RuntimeRunService._final_answer_evidence_closed(state):
+            return False
+        if not state.final_answer_verified or not state.verification_completed:
+            return False
+        return any(
+            item.final_answer_verified
+            and set(state.final_answer_evidence_ids).issubset(set(item.evidence_ids))
+            and item.answer_source_agent_id != item.verifier_agent_instance_id
+            for item in state.verified_deltas
+        )
 
     @staticmethod
     def _finding_fingerprint(finding: Finding) -> str:
@@ -2099,7 +2169,14 @@ class RuntimeRunService:
             state.agent_results.append(result)
             data = result.get("data")
             if isinstance(data, dict):
-                self._merge_answer_contract(state, data, allow_verification=False)
+                answer_data = dict(data)
+                answer_data.setdefault("evidence_ids", result.get("evidence_ids", []))
+                self._merge_answer_contract(
+                    state,
+                    answer_data,
+                    allow_verification=False,
+                    source_agent_instance_id=str(result.get("agent_instance_id") or "") or None,
+                )
             state.artifact_refs = sorted(
                 set(state.artifact_refs)
                 | {str(item) for item in result.get("artifact_refs", [])}
@@ -2212,10 +2289,15 @@ class RuntimeRunService:
                 known_tool_calls.add(invocation_id)
             data = tool_call.get("data")
             if isinstance(data, dict):
+                answer_data = dict(data)
+                answer_data.setdefault("evidence_ids", tool_call.get("evidence_ids", []))
                 answer_verified = self._merge_answer_contract(
                     state,
-                    data,
+                    answer_data,
                     allow_verification=True,
+                    source_agent_instance_id=(
+                        str(tool_call.get("agent_instance_id") or invocation_id) or None
+                    ),
                 )
             else:
                 answer_verified = False
@@ -2247,8 +2329,33 @@ class RuntimeRunService:
                     evidence_ids=evidence_refs,
                     artifact_refs=artifact_refs,
                     final_answer_verified=True,
+                    verifier_agent_instance_id=(
+                        str(tool_call.get("agent_instance_id") or invocation_id) or None
+                    ),
+                    answer_source_agent_id=state.final_answer_source_agent_id,
                 )
         state.tool_call_ids = sorted(set(state.tool_call_ids))
+
+        circuit_state = bundle.get("circuit_state")
+        if isinstance(circuit_state, dict):
+            state.opened_circuit_keys = sorted(
+                set(state.opened_circuit_keys)
+                | {str(item) for item in circuit_state.get("opened_circuit_keys", [])}
+            )
+            state.unavailable_server_ids = sorted(
+                set(state.unavailable_server_ids)
+                | {str(item) for item in circuit_state.get("unavailable_server_ids", [])}
+            )
+            state.unavailable_tool_ids = sorted(
+                set(state.unavailable_tool_ids)
+                | {str(item) for item in circuit_state.get("unavailable_tool_ids", [])}
+            )
+            if state.capability_plan is not None:
+                state.capability_plan.allowed_tool_ids = [
+                    item
+                    for item in state.capability_plan.allowed_tool_ids
+                    if item not in state.unavailable_tool_ids
+                ]
 
     @staticmethod
     def _merge_answer_contract(
@@ -2256,6 +2363,7 @@ class RuntimeRunService:
         data: dict[str, Any],
         *,
         allow_verification: bool,
+        source_agent_instance_id: str | None = None,
     ) -> bool:
         answer = next(
             (
@@ -2265,8 +2373,17 @@ class RuntimeRunService:
             ),
             None,
         )
+        answer_evidence_ids = [
+            str(item)
+            for item in data.get(
+                "final_answer_evidence_ids",
+                data.get("evidence_ids", []),
+            )
+        ]
         if isinstance(answer, str) and not state.final_answer:
             state.final_answer = answer.strip()
+            state.final_answer_source_agent_id = source_agent_instance_id
+            state.final_answer_evidence_ids = sorted(set(answer_evidence_ids))
         raw_steps = data.get("reproduction_steps", data.get("steps_to_reproduce"))
         steps = raw_steps if isinstance(raw_steps, list) else [raw_steps]
         for item in steps:
@@ -2275,14 +2392,24 @@ class RuntimeRunService:
                 state.reproduction_steps.append(step)
         verified = False
         if allow_verification:
+            state.verification_attempted = True
+            state.verification_completed = True
             verdict = data.get("verification_result", data.get("verdict"))
             explicit = data.get("final_answer_verified", data.get("verification_passed"))
             if explicit is True or (
                 isinstance(verdict, str)
                 and verdict.strip().lower() in {"confirmed", "passed", "verified", "valid"}
             ):
-                if not isinstance(answer, str) or answer.strip() == state.final_answer:
+                source_is_independent = (
+                    source_agent_instance_id != state.final_answer_source_agent_id
+                )
+                if (
+                    (not isinstance(answer, str) or answer.strip() == state.final_answer)
+                    and source_is_independent
+                    and RuntimeRunService._final_answer_evidence_closed(state)
+                ):
                     state.final_answer_verified = True
+                    state.verification_passed = True
                     verified = True
         return verified
 
@@ -2387,13 +2514,27 @@ class RuntimeRunService:
         evidence_ids: list[str] | None = None,
         artifact_refs: list[str] | None = None,
         final_answer_verified: bool = False,
+        verifier_agent_instance_id: str | None = None,
+        answer_source_agent_id: str | None = None,
     ) -> None:
         finding_ids = sorted(set(finding_ids or []))
         evidence_ids = sorted(set(evidence_ids or []))
         artifact_refs = sorted(set(artifact_refs or []))
-        identity = (source, tuple(finding_ids), final_answer_verified)
+        identity = (
+            source,
+            tuple(finding_ids),
+            tuple(evidence_ids),
+            final_answer_verified,
+            verifier_agent_instance_id,
+        )
         known = {
-            (item.source, tuple(item.finding_ids), item.final_answer_verified)
+            (
+                item.source,
+                tuple(item.finding_ids),
+                tuple(item.evidence_ids),
+                item.final_answer_verified,
+                item.verifier_agent_instance_id,
+            )
             for item in state.verified_deltas
         }
         if identity in known:
@@ -2405,6 +2546,8 @@ class RuntimeRunService:
                 evidence_ids=evidence_ids,
                 artifact_refs=artifact_refs,
                 final_answer_verified=final_answer_verified,
+                verifier_agent_instance_id=verifier_agent_instance_id,
+                answer_source_agent_id=answer_source_agent_id,
             )
         )
 

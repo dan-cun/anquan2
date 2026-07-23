@@ -61,13 +61,19 @@ class CapabilityRouter:
         artifacts: list[InputArtifact],
         tool_definitions: Iterable[Any],
         completion_mode: CompletionMode,
+        unavailable_tool_ids: set[str] | None = None,
     ) -> CapabilityPlan:
+        unavailable_tool_ids = unavailable_tool_ids or set()
         tool_ids = sorted(
             {
                 str(getattr(item, "tool_id", None) or item.get("tool_id") or "")
                 for item in tool_definitions
-                if getattr(item, "tool_id", None)
-                or (isinstance(item, dict) and item.get("tool_id"))
+                if (
+                    getattr(item, "tool_id", None)
+                    or (isinstance(item, dict) and item.get("tool_id"))
+                )
+                and str(getattr(item, "tool_id", None) or item.get("tool_id") or "")
+                not in unavailable_tool_ids
             }
         )
         languages = sorted(

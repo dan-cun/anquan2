@@ -62,6 +62,7 @@ class RuntimeEventType(StrEnum):
     AGENT_COMPLETED = "agent.completed"
     AGENT_FAILED = "agent.failed"
     AGENT_CANCELLED = "agent.cancelled"
+    AGENT_ACTION_INVALID = "agent.action_invalid"
     MCP_CONNECTED = "mcp.connected"
     MCP_DISCONNECTED = "mcp.disconnected"
     MCP_CAPABILITIES_UPDATED = "mcp.capabilities_updated"
@@ -404,7 +405,21 @@ class VerificationDelta(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     final_answer_verified: bool = False
+    verifier_agent_instance_id: str | None = None
+    answer_source_agent_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class CompletionGateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    passed: bool
+    checks: dict[str, bool] = Field(default_factory=dict)
+    reason: str
+    verified_finding_ids: list[str] = Field(default_factory=list)
+    verified_evidence_ids: list[str] = Field(default_factory=list)
+    evaluator_ready: bool = False
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class PlanStep(BaseModel):
@@ -605,6 +620,11 @@ class AgentReport(BaseModel):
     review_converged: bool = False
     completion_gate_reason: str | None = None
     completion_gate_checks: dict[str, bool] = Field(default_factory=dict)
+    completion_gate_passed: bool | None = None
+    completion_gate_result: CompletionGateResult | None = None
+    verification_attempted: bool = False
+    verification_completed: bool = False
+    final_answer_evidence_ids: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -647,6 +667,8 @@ class AgentState(BaseModel):
     completion_mode: CompletionMode = CompletionMode.FINDINGS
     final_answer: str | None = None
     final_answer_verified: bool = False
+    final_answer_evidence_ids: list[str] = Field(default_factory=list)
+    final_answer_source_agent_id: str | None = None
     reproduction_steps: list[str] = Field(default_factory=list)
     review_round: int = Field(default=0, ge=0)
     review_finding_fingerprints: list[str] = Field(default_factory=list)
@@ -658,7 +680,14 @@ class AgentState(BaseModel):
     approvals: list[dict[str, Any]] = Field(default_factory=list)
     retry_counts: dict[str, int] = Field(default_factory=dict)
     reflection_count: int = Field(default=0, ge=0)
+    verification_attempted: bool = False
+    verification_completed: bool = False
     verification_passed: bool | None = None
+    completion_gate_passed: bool | None = None
+    completion_gate_result: CompletionGateResult | None = None
+    opened_circuit_keys: list[str] = Field(default_factory=list)
+    unavailable_server_ids: list[str] = Field(default_factory=list)
+    unavailable_tool_ids: list[str] = Field(default_factory=list)
     state_revision: int = Field(default=0, ge=0)
     budget: BudgetState = Field(default_factory=BudgetState)
     soft_deadline_at: datetime | None = None
@@ -734,6 +763,8 @@ class RunSummary(BaseModel):
     total_steps: int
     active_step_id: str | None = None
     verification_passed: bool | None = None
+    verification_attempted: bool = False
+    verification_completed: bool = False
     task_contract: TaskContract | None = None
     completion_mode: CompletionMode = CompletionMode.FINDINGS
     final_answer_verified: bool = False
@@ -741,6 +772,12 @@ class RunSummary(BaseModel):
     review_converged: bool = False
     completion_gate_reason: str | None = None
     completion_gate_checks: dict[str, bool] = Field(default_factory=dict)
+    completion_gate_passed: bool | None = None
+    completion_gate_result: CompletionGateResult | None = None
+    final_answer_evidence_ids: list[str] = Field(default_factory=list)
+    opened_circuit_keys: list[str] = Field(default_factory=list)
+    unavailable_server_ids: list[str] = Field(default_factory=list)
+    unavailable_tool_ids: list[str] = Field(default_factory=list)
     complexity_profile: TaskComplexity = TaskComplexity.STANDARD
     soft_deadline_at: datetime | None = None
     hard_deadline_at: datetime | None = None

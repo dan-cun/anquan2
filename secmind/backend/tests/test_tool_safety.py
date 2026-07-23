@@ -8,6 +8,7 @@ import pytest
 from agents.guardrail import Guardrail
 from app.database import create_native_repositories
 from app.schemas.agents import AgentInstance, AgentRole
+from app.schemas.mcp import MCPServerConfig, MCPTransport
 from app.schemas.runtime import (
     CircuitState,
     RiskLevel,
@@ -248,6 +249,100 @@ async def test_mcp_server_circuit_blocks_sibling_tool() -> None:
     assert failed.status == ToolExecutionStatus.FAILED
     assert blocked.error_code == "circuit_open"
     assert manager.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_persisted_gateway_propagates_server_circuit_to_run_catalog(tmp_path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'run-circuit.db'}"
+    repositories = create_native_repositories(database_url)
+    Base.metadata.create_all(repositories.engine)
+    flow = repositories.flows.ensure_flow("flow-1", title="Run circuit test")
+    repositories.mcp.upsert_server(
+        MCPServerConfig(
+            server_id="server",
+            name="Test server",
+            transport=MCPTransport.STREAMABLE_HTTP,
+            url="http://127.0.0.1:9999/mcp",
+        )
+    )
+    repositories.agents.create_instance(
+        AgentInstance(
+            instance_id="agent-1",
+            run_id="run-1",
+            flow_id=flow.id,
+            role=AgentRole.PENTESTER,
+        )
+    )
+    definitions = [
+        UnifiedToolDefinition(
+            tool_id="mcp:server:one",
+            name="one",
+            origin=ToolOrigin.MCP,
+            server_id="server",
+        ),
+        UnifiedToolDefinition(
+            tool_id="mcp:server:two",
+            name="two",
+            origin=ToolOrigin.MCP,
+            server_id="server",
+        ),
+    ]
+    manager = FakeMCPManager(definitions)
+    manager.result = UnifiedToolResult(
+        invocation_id="placeholder",
+        tool_id="placeholder",
+        status=ToolExecutionStatus.FAILED,
+        error_code="mcp_call_error",
+        error_message="server failed",
+    )
+    gateway = UnifiedToolGateway(
+        manager,  # type: ignore[arg-type]
+        circuit_breakers=CircuitBreakerRegistry(failure_threshold=1),
+    )
+    persisted = PersistedToolGateway(
+        gateway=gateway,
+        repositories=repositories,
+        ledger=RuntimeLedgerStore(database_url),
+        event_hub=RuntimeEventHub(),
+    )
+
+    failed = await persisted.invoke(invocation(definitions[0].tool_id))
+    assert failed.error_code == "mcp_call_error"
+    assert persisted.run_circuit_state("run-1") == {
+        "opened_circuit_keys": ["server:server", "tool:mcp:server:one"],
+        "unavailable_server_ids": ["server"],
+        "unavailable_tool_ids": ["mcp:server:one", "mcp:server:two"],
+    }
+    assert persisted.definitions_for_run("run-1") == []
+    assert [item.tool_id for item in persisted.definitions_for_run("run-2")] == [
+        "mcp:server:one",
+        "mcp:server:two",
+    ]
+
+    blocked = await persisted.invoke(invocation(definitions[1].tool_id))
+    assert blocked.error_code == "capability_unavailable"
+    assert blocked.data["run_circuit"] is True
+    assert manager.calls == 1
+
+    restored_manager = FakeMCPManager(definitions)
+    restored_gateway = UnifiedToolGateway(
+        restored_manager,  # type: ignore[arg-type]
+        circuit_breakers=CircuitBreakerRegistry(failure_threshold=1),
+    )
+    restored = PersistedToolGateway(
+        gateway=restored_gateway,
+        repositories=repositories,
+        ledger=RuntimeLedgerStore(database_url),
+        event_hub=RuntimeEventHub(),
+    )
+    restored.restore_run_circuit_state(
+        "run-1",
+        **persisted.run_circuit_state("run-1"),
+    )
+    assert restored.definitions_for_run("run-1") == []
+    restored_blocked = await restored.invoke(invocation(definitions[1].tool_id))
+    assert restored_blocked.error_code == "capability_unavailable"
+    assert restored_manager.calls == 0
 
 
 @pytest.mark.asyncio

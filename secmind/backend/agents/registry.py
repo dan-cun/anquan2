@@ -173,6 +173,7 @@ def build_native_agent_registry(
     prompts: PromptResolver,
     max_iterations: int = 24,
     max_reflections: int = 3,
+    max_action_repair_attempts: int | None = 1,
     loop_guard_config: LoopGuardConfig | None = None,
 ) -> NativeAgentRegistry:
     registry = NativeAgentRegistry()
@@ -184,6 +185,7 @@ def build_native_agent_registry(
             prompts=prompts,
             max_iterations=max_iterations,
             max_reflections=max_reflections,
+            max_action_repair_attempts=max_action_repair_attempts,
             loop_guard_config=loop_guard_config,
         )
 

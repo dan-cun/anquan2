@@ -29,6 +29,7 @@ from app.schemas.runtime import (
     ToolStatus,
     UnitOutcomeStatus,
     UniversalPrimaryResult,
+    VerificationDelta,
 )
 from app.services.runtime import RuntimeEventHub, RuntimeRunService
 from ledger.runtime_store import RuntimeLedgerStore
@@ -272,11 +273,22 @@ async def test_graph_checkpoint_references_authoritative_runtime_state(tmp_path:
     runtime, _, _ = build_runtime(tmp_path)
 
     state = await runtime.run_inline(audit_task(), "single-owner-run")
+    state.opened_circuit_keys = ["server:restored-server"]
+    state.unavailable_server_ids = ["restored-server"]
+    state.unavailable_tool_ids = ["mcp:restored-server:scan"]
+    runtime.ledger.save_state(state)
     snapshot = await runtime.graph_runtime.snapshot("single-owner-run")
+    restored = runtime.ledger.load_state("single-owner-run")
 
     assert snapshot["run_id"] == state.run_id
     assert snapshot["state_revision"] == state.state_revision
     assert "runtime_state" not in snapshot
+    assert restored is not None
+    assert restored.completion_gate_result == state.completion_gate_result
+    assert restored.completion_gate_passed == state.completion_gate_passed
+    assert restored.opened_circuit_keys == ["server:restored-server"]
+    assert restored.unavailable_server_ids == ["restored-server"]
+    assert restored.unavailable_tool_ids == ["mcp:restored-server:scan"]
 
 
 @pytest.mark.asyncio
@@ -558,17 +570,21 @@ async def test_finding_task_rejects_successful_tool_with_empty_evidence(tmp_path
     state = await runtime.run_inline(audit_task(), "empty-evidence-run")
 
     assert state.status == RunStatus.PARTIAL
-    assert state.verification_passed is False
+    assert state.verification_passed is True
+    assert state.completion_gate_passed is False
     assert state.review_round == 2
     assert state.review_converged is True
     assert state.completion_gate_reason is not None
-    assert "at least one finding" in state.completion_gate_reason
+    assert "missing expected output(s): findings, evidence" in state.completion_gate_reason
 
 
 @pytest.mark.asyncio
 async def test_completion_gate_rejects_evidence_not_in_verified_delta(tmp_path: Path) -> None:
     runtime, _, _ = build_runtime(tmp_path)
-    state = runtime.new_state(audit_task(), "unverified-evidence-run")
+    state = runtime.new_state(
+        audit_task(expected_outputs=["evidence"], required_evidence=["evidence"]),
+        "unverified-evidence-run",
+    )
     evidence = Evidence(
         evidence_id="unverified-evidence",
         source="test",
@@ -586,15 +602,83 @@ async def test_completion_gate_rejects_evidence_not_in_verified_delta(tmp_path: 
         )
     ]
     state.review_converged = True
+    state.verification_attempted = True
+    state.verification_completed = True
+    state.verification_passed = True
     state.status = RunStatus.RUNNING
     runtime.ledger.save_state(state)
 
     updated = await runtime.node_completion_gate(state)
 
     assert updated.status == RunStatus.PARTIAL
-    assert updated.verification_passed is False
+    assert updated.verification_passed is True
+    assert updated.completion_gate_passed is False
     assert updated.completion_gate_checks["evidence_closure"] is False
     assert updated.completion_gate_reason == "Evidence reference closure was not satisfied"
+
+
+@pytest.mark.asyncio
+async def test_completion_gate_rejects_run_when_verify_was_not_attempted(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "verify-not-attempted-run")
+    state.review_converged = True
+    state.status = RunStatus.RUNNING
+
+    updated = await runtime.node_completion_gate(state)
+
+    assert updated.status == RunStatus.PARTIAL
+    assert updated.verification_attempted is False
+    assert updated.completion_gate_passed is False
+    assert updated.completion_gate_reason == "Verify stage was not attempted"
+
+
+@pytest.mark.asyncio
+async def test_completion_gate_rejects_incomplete_evaluator_prerequisite(
+    tmp_path: Path,
+) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(
+        audit_task(
+            expected_outputs=["final_answer"],
+            required_evidence=["final_answer", "independent_verification"],
+            completion_mode="final_answer",
+            evaluator="manual_no_verified_evidence",
+        ),
+        "evaluator-not-ready-run",
+    )
+    evidence = Evidence(
+        evidence_id="answer-evidence",
+        source="test",
+        summary="Evidence for an independently checked answer",
+    )
+    state.evidence = [evidence]
+    state.final_answer = "answer-42"
+    state.final_answer_evidence_ids = [evidence.evidence_id]
+    state.final_answer_source_agent_id = "answer-agent"
+    state.final_answer_verified = True
+    state.verification_attempted = True
+    state.verification_completed = True
+    state.verification_passed = True
+    state.review_converged = True
+    state.verified_deltas = [
+        VerificationDelta(
+            source="independent-verifier",
+            evidence_ids=[evidence.evidence_id],
+            final_answer_verified=True,
+            verifier_agent_instance_id="verifier-agent",
+            answer_source_agent_id="answer-agent",
+        )
+    ]
+    state.status = RunStatus.RUNNING
+
+    updated = await runtime.node_completion_gate(state)
+
+    assert updated.status == RunStatus.PARTIAL
+    assert updated.completion_gate_passed is False
+    assert updated.completion_gate_checks["evaluator:manual_no_verified_evidence"] is False
+    assert updated.completion_gate_reason == (
+        "Task evaluator prerequisite was not satisfied: manual_no_verified_evidence"
+    )
 
 
 @pytest.mark.asyncio
@@ -685,6 +769,7 @@ async def test_answer_task_requires_answer_and_verification_result(tmp_path: Pat
 
     async def collaboration(state: Any, review_round: int) -> dict[str, Any]:
         del state
+        evidence_id = "answer-evidence"
         return {
             "agent_result": {
                 "agent_instance_id": f"answer-agent-{review_round}",
@@ -693,7 +778,15 @@ async def test_answer_task_requires_answer_and_verification_result(tmp_path: Pat
                 "data": {
                     "final_answer": "answer-42",
                 },
+                "evidence_ids": [evidence_id],
             },
+            "evidence": [
+                {
+                    "evidence_id": evidence_id,
+                    "source": "answer-verifier",
+                    "summary": "Independent answer verification output",
+                }
+            ],
             "tool_calls": [
                 {
                     "invocation_id": f"answer-verifier-{review_round}",
@@ -704,6 +797,8 @@ async def test_answer_task_requires_answer_and_verification_result(tmp_path: Pat
                             "verified" if review_round == 2 else "inconclusive"
                         )
                     },
+                    "agent_instance_id": f"verifier-agent-{review_round}",
+                    "evidence_ids": [evidence_id],
                 }
             ],
         }
@@ -719,6 +814,8 @@ async def test_answer_task_requires_answer_and_verification_result(tmp_path: Pat
     assert state.status == RunStatus.COMPLETED
     assert state.final_answer == "answer-42"
     assert state.final_answer_verified is True
+    assert state.final_answer_evidence_ids == ["answer-evidence"]
+    assert state.completion_gate_passed is True
     assert state.report is not None
     assert state.report.final_answer == "answer-42"
 
@@ -758,7 +855,8 @@ async def test_successful_answer_tool_cannot_bypass_missing_contract_outputs(
     )
 
     assert state.status == RunStatus.PARTIAL
-    assert state.final_answer_verified is True
+    assert state.final_answer_verified is False
+    assert state.completion_gate_passed is False
     assert state.completion_gate_checks["output:evidence"] is False
     assert state.completion_gate_checks["output:reproduction_steps"] is False
     assert state.completion_gate_reason == (
@@ -903,7 +1001,7 @@ async def test_second_review_new_finding_prevents_completion(tmp_path: Path) -> 
     assert state.status == RunStatus.PARTIAL
     assert state.review_round == 2
     assert state.review_converged is False
-    assert state.verification_passed is False
+    assert state.completion_gate_passed is False
 
 
 @pytest.mark.asyncio

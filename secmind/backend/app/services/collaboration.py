@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -140,10 +141,48 @@ class PersistedToolGateway:
         self.ledger = ledger
         self.event_hub = event_hub
         self.workspace_resolver = workspace_resolver
+        self._run_opened_circuit_keys: dict[str, set[str]] = defaultdict(set)
         self.gateway.set_event_publisher(self._publish_gateway_event)
 
     def definitions(self) -> list[UnifiedToolDefinition]:
         return self.gateway.definitions()
+
+    def definitions_for_run(self, run_id: str) -> list[UnifiedToolDefinition]:
+        unavailable = self._run_unavailable_tool_ids(run_id)
+        return [item for item in self.definitions() if item.tool_id not in unavailable]
+
+    def run_circuit_state(self, run_id: str) -> dict[str, list[str]]:
+        keys = sorted(self._run_opened_circuit_keys.get(run_id, set()))
+        servers = sorted(
+            key.removeprefix("server:") for key in keys if key.startswith("server:")
+        )
+        tools = sorted(
+            item.tool_id
+            for item in self.definitions()
+            if item.server_id in servers or f"tool:{item.tool_id}" in keys
+        )
+        return {
+            "opened_circuit_keys": keys,
+            "unavailable_server_ids": servers,
+            "unavailable_tool_ids": tools,
+        }
+
+    def restore_run_circuit_state(
+        self,
+        run_id: str,
+        *,
+        opened_circuit_keys: list[str] | None = None,
+        unavailable_server_ids: list[str] | None = None,
+        unavailable_tool_ids: list[str] | None = None,
+    ) -> None:
+        keys = {
+            str(item)
+            for item in (opened_circuit_keys or [])
+            if str(item).startswith(("server:", "tool:"))
+        }
+        keys.update(f"server:{item}" for item in (unavailable_server_ids or []) if item)
+        keys.update(f"tool:{item}" for item in (unavailable_tool_ids or []) if item)
+        self._run_opened_circuit_keys[run_id].update(keys)
 
     async def invoke(self, invocation: UnifiedToolInvocation) -> UnifiedToolResult:
         invocation = self._bind_workspace(invocation)
@@ -177,28 +216,55 @@ class PersistedToolGateway:
         )
         self.repositories.tool_calls.mark_running(invocation.invocation_id)
         await self._publish("tool.started", invocation, safe_invocation.model_dump(mode="json"))
-        try:
-            result = await self.gateway.invoke(invocation)
-        except asyncio.CancelledError:
-            result = UnifiedToolResult(
-                invocation_id=invocation.invocation_id,
-                tool_id=invocation.tool_id,
-                status=ToolExecutionStatus.CANCELLED,
-                error_code="tool_cancelled",
-                error_message="Tool call was cancelled by its caller",
-            )
-            await self._finalize(invocation, safe_invocation, result)
-            raise
-        except Exception as error:
+        if invocation.tool_id in self._run_unavailable_tool_ids(invocation.run_id):
             result = UnifiedToolResult(
                 invocation_id=invocation.invocation_id,
                 tool_id=invocation.tool_id,
                 status=ToolExecutionStatus.FAILED,
-                error_code="tool_gateway_error",
-                error_message=f"{type(error).__name__}: {safe_error_message(error)}",
+                error_code="capability_unavailable",
+                error_message="Tool is unavailable for this run after its MCP circuit opened",
+                data={"run_circuit": True, "reason": "circuit_open"},
             )
+        else:
+            try:
+                result = await self.gateway.invoke(invocation)
+            except asyncio.CancelledError:
+                result = UnifiedToolResult(
+                    invocation_id=invocation.invocation_id,
+                    tool_id=invocation.tool_id,
+                    status=ToolExecutionStatus.CANCELLED,
+                    error_code="tool_cancelled",
+                    error_message="Tool call was cancelled by its caller",
+                )
+                await self._finalize(invocation, safe_invocation, result)
+                raise
+            except Exception as error:
+                result = UnifiedToolResult(
+                    invocation_id=invocation.invocation_id,
+                    tool_id=invocation.tool_id,
+                    status=ToolExecutionStatus.FAILED,
+                    error_code="tool_gateway_error",
+                    error_message=f"{type(error).__name__}: {safe_error_message(error)}",
+                )
+        self._record_result_circuit(invocation.run_id, result)
         await self._finalize(invocation, safe_invocation, result)
         return result
+
+    def _run_unavailable_tool_ids(self, run_id: str) -> set[str]:
+        state = self._run_opened_circuit_keys.get(run_id, set())
+        return {
+            item.tool_id
+            for item in self.definitions()
+            if f"tool:{item.tool_id}" in state
+            or (item.server_id is not None and f"server:{item.server_id}" in state)
+        }
+
+    def _record_result_circuit(self, run_id: str, result: UnifiedToolResult) -> None:
+        if result.error_code != "circuit_open":
+            return
+        key = str(result.data.get("circuit_key") or "")
+        if key:
+            self._run_opened_circuit_keys[run_id].add(key)
 
     def _bind_workspace(self, invocation: UnifiedToolInvocation) -> UnifiedToolInvocation:
         if self.workspace_resolver is None:
@@ -230,6 +296,10 @@ class PersistedToolGateway:
         invocation: UnifiedToolInvocation,
         payload: dict[str, Any],
     ) -> None:
+        if event_type == "circuit.opened":
+            key = str(payload.get("circuit_key") or "")
+            if key:
+                self._run_opened_circuit_keys[invocation.run_id].add(key)
         await self._publish(event_type, invocation, payload)
 
     async def _publish(
@@ -255,7 +325,11 @@ class PersistedToolGateway:
             return "tool.timed_out"
         if result.status == ToolExecutionStatus.CANCELLED:
             return "tool.cancelled"
-        if result.error_code in {"scope_violation", "circuit_open"}:
+        if result.error_code in {
+            "scope_violation",
+            "circuit_open",
+            "capability_unavailable",
+        }:
             return "tool.blocked"
         return "tool.failed"
 

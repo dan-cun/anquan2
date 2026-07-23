@@ -327,7 +327,7 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
             AgentRole.PRIMARY_AGENT: [
                 action("delegate", role="coder", objective="Audit the Python source"),
                 action("delegate", role="pentester", objective="Validate the reported weakness"),
-                "The specialists have returned enough evidence.",
+                "not valid action envelope",
                 action("complete", summary="Audit and validation completed"),
             ],
             AgentRole.CODER: [
@@ -346,8 +346,8 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
                     finding_ids=["finding-1"],
                 )
             ],
-            AgentRole.REFLECTOR: [
-                "Return a complete action with the public evidence-backed summary."
+            AgentRole.TOOLCALL_FIXER: [
+                action("complete", summary="Audit and validation completed")
             ],
         }
     )
@@ -385,15 +385,13 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
         AgentRole.PRIMARY_AGENT,
         AgentRole.PENTESTER,
         AgentRole.PRIMARY_AGENT,
-        AgentRole.REFLECTOR,
-        AgentRole.PRIMARY_AGENT,
+        AgentRole.TOOLCALL_FIXER,
     ]
 
     delegations = dispatcher.delegations("run-parity")
     assert [item.to_role for item in delegations] == [
         AgentRole.CODER,
         AgentRole.PENTESTER,
-        AgentRole.REFLECTOR,
     ]
     assert all(item.status == AgentStatus.COMPLETED for item in delegations)
     assert all(item.to_agent_instance_id for item in delegations)
@@ -403,23 +401,22 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
     for message in messages:
         by_kind[message.kind] += 1
     assert by_kind == {
-        AgentMessageKind.DELEGATION: 3,
-        AgentMessageKind.RESPONSE: 3,
+        AgentMessageKind.DELEGATION: 2,
+        AgentMessageKind.RESPONSE: 2,
     }
-    assert [item.sequence for item in messages] == [1, 2, 3, 4, 5, 6]
+    assert [item.sequence for item in messages] == [1, 2, 3, 4]
 
     instances = dispatcher.instances("run-parity")
     assert [item.role for item in instances] == [
         AgentRole.PRIMARY_AGENT,
         AgentRole.CODER,
         AgentRole.PENTESTER,
-        AgentRole.REFLECTOR,
     ]
     primary = instances[0]
     assert all(item.parent_instance_id == primary.instance_id for item in instances[1:])
     chains = await dispatcher.chain_store.list_for_run("run-parity")
-    assert len(chains) == 4
-    assert len({item.chain_id for item in chains}) == 4
+    assert len(chains) == 3
+    assert len({item.chain_id for item in chains}) == 3
     assert {item.agent_instance_id for item in chains} == {item.instance_id for item in instances}
     primary_chain = next(item for item in chains if item.agent_role == AgentRole.PRIMARY_AGENT)
     delegated_observations = [
@@ -427,7 +424,7 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
         for message in primary_chain.messages
         if message.metadata.get("observation_source") == "agent"
     ]
-    assert len(delegated_observations) == 3
+    assert len(delegated_observations) == 2
     assert all(message.role == "user" for message in delegated_observations)
     assert all(message.role != "tool" for message in primary_chain.messages)
     observation_payloads = [json.loads(message.content) for message in delegated_observations]
@@ -442,8 +439,8 @@ async def test_pentagi_primary_specialist_reflector_chain_parity() -> None:
     assert gateway.invocations[0].tool_id == "native:code_scan"
     assert gateway.invocations[0].subtask_id == "subtask-1"
     event_types = [item[0] for item in events.events]
-    assert event_types.count("agent.delegated") == 3
-    assert event_types.count("agent.message") == 6
+    assert event_types.count("agent.delegated") == 2
+    assert event_types.count("agent.message") == 4
     assert event_types[-1] == "agent.completed"
 
 
@@ -546,8 +543,8 @@ async def test_delegation_depth_failure_has_a_real_child_instance() -> None:
 async def test_invalid_actions_fail_after_bounded_reflection() -> None:
     model = ScriptedModel(
         {
-            AgentRole.PRIMARY_AGENT: ["invalid one", "invalid two"],
-            AgentRole.REFLECTOR: ["Correct it", "Correct it again"],
+            AgentRole.PRIMARY_AGENT: ["invalid one"],
+            AgentRole.TOOLCALL_FIXER: ["still invalid"],
         }
     )
     registry = build_native_agent_registry(
@@ -556,11 +553,33 @@ async def test_invalid_actions_fail_after_bounded_reflection() -> None:
         max_iterations=5,
         max_reflections=1,
     )
-    dispatcher = AgentDispatcher(registry=registry)
+    events = EventRecorder()
+    dispatcher = AgentDispatcher(registry=registry, publisher=events.publish)
     task = AgentTask(run_id="run-invalid", flow_id="flow-invalid", objective="Do work")
 
     result = await dispatcher.dispatch_root(AgentRole.PRIMARY_AGENT, task)
 
     assert result.status == AgentStatus.FAILED
-    assert result.error_code == "AGENT_ACTION_INVALID"
-    assert [item.to_role for item in dispatcher.delegations()] == [AgentRole.REFLECTOR]
+    assert result.error_code == "AGENT_ACTION_REPAIR_FAILED"
+    assert model.calls == [AgentRole.PRIMARY_AGENT, AgentRole.TOOLCALL_FIXER]
+    assert dispatcher.delegations() == []
+    chain = await dispatcher.chain_store.for_instance(dispatcher.instances()[0].instance_id)
+    repair = [
+        message
+        for message in chain.messages
+        if message.metadata.get("observation_source") == "policy"
+    ]
+    assert len(repair) == 1
+    assert "AGENT_ACTION_REPAIR_FAILED" in repair[0].content
+    assert "invalid one" not in repair[0].content
+    invalid_event = next(item for item in events.events if item[0] == "agent.action_invalid")
+    assert set(invalid_event[1]) == {
+        "run_id",
+        "flow_id",
+        "agent_instance_id",
+        "task_id",
+        "response_sha256",
+        "diagnostic",
+        "repair_attempts_used",
+    }
+    assert "invalid one" not in json.dumps(invalid_event[1])

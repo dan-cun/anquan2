@@ -287,6 +287,35 @@ def _policy_observation(*, source_id: str, summary: str, terminal: bool) -> Agen
     )
 
 
+def _action_repair_observation(
+    *,
+    response_sha256: str,
+    attempts: int,
+    repaired_action: AgentAction | None,
+    diagnostic: str,
+) -> AgentObservation:
+    failed = repaired_action is None
+    return AgentObservation(
+        source="policy",
+        source_id=f"action-repair:{response_sha256}",
+        summary=(
+            "Agent action envelope could not be repaired"
+            if failed
+            else "Agent action envelope was repaired and validated"
+        ),
+        status="failed" if failed else "completed",
+        data={
+            "error_code": "AGENT_ACTION_REPAIR_FAILED" if failed else None,
+            "attempts": attempts,
+            "retryable": False,
+            "response_sha256": response_sha256,
+            "diagnostic": diagnostic,
+            "repaired_action": None if failed else repaired_action.action.value,
+        },
+        metadata={"terminal": failed},
+    )
+
+
 @dataclass(slots=True)
 class AgentRunContext:
     instance: AgentInstance
@@ -405,6 +434,7 @@ class ModelNativeAgent(NativeAgent):
         prompts: PromptResolver,
         max_iterations: int = 24,
         max_reflections: int = 3,
+        max_action_repair_attempts: int | None = 1,
         loop_guard_config: LoopGuardConfig | None = None,
     ) -> None:
         super().__init__(descriptor)
@@ -412,10 +442,15 @@ class ModelNativeAgent(NativeAgent):
             raise ValueError("max_iterations must be positive")
         if max_reflections < 0:
             raise ValueError("max_reflections must not be negative")
+        if max_action_repair_attempts is not None and max_action_repair_attempts < 0:
+            raise ValueError("max_action_repair_attempts must not be negative")
         self.model = model
         self.prompts = prompts
         self.max_iterations = max_iterations
         self.max_reflections = max_reflections
+        self.max_action_repair_attempts = (
+            1 if max_action_repair_attempts is None else max_action_repair_attempts
+        )
         self.loop_guard_config = loop_guard_config or LoopGuardConfig()
 
     async def run(self, context: AgentRunContext) -> AgentResult:
@@ -453,7 +488,7 @@ class ModelNativeAgent(NativeAgent):
             expected_outputs=context.task.expected_outputs,
         )
 
-        reflection_count = 0
+        action_repair_attempts = 0
         loop_guard = AgentLoopGuard(self.loop_guard_config)
         for iteration in range(1, self.max_iterations + 1):
             if context.stop_requested():
@@ -500,28 +535,52 @@ class ModelNativeAgent(NativeAgent):
                 return self._cancelled(context)
             try:
                 action = parse_agent_action(response.content)
-            except AgentActionError:
-                if self.descriptor.role == AgentRole.REFLECTOR:
-                    return self._complete(context, response.content.strip())
-                if reflection_count >= self.max_reflections:
+            except AgentActionError as error:
+                response_sha256 = hashlib.sha256(response.content.encode("utf-8")).hexdigest()
+                await context.publish_runtime_event(
+                    "agent.action_invalid",
+                    {
+                        "response_sha256": response_sha256,
+                        "diagnostic": type(error.__cause__).__name__,
+                        "repair_attempts_used": action_repair_attempts,
+                    },
+                )
+                repair_forbidden = self.descriptor.role in {
+                    AgentRole.REFLECTOR,
+                    AgentRole.TOOLCALL_FIXER,
+                }
+                if repair_forbidden or action_repair_attempts >= self.max_action_repair_attempts:
+                    observation = _action_repair_observation(
+                        response_sha256=response_sha256,
+                        attempts=action_repair_attempts,
+                        repaired_action=None,
+                        diagnostic="repair_not_available",
+                    )
+                    context.chain.append_observation(observation)
                     return self._failed(
                         context,
-                        code="AGENT_ACTION_INVALID",
-                        message="Agent repeatedly returned an invalid action envelope",
+                        code="AGENT_ACTION_REPAIR_FAILED",
+                        message=observation.summary,
                     )
-                reflection_count += 1
-                reflection = await context.delegate(
-                    AgentRole.REFLECTOR,
-                    objective=(
-                        "Correct this Agent response so the original Agent can return one valid "
-                        f"action envelope. Response:\n{response.content}"
-                    ),
-                    expected_outputs=["public corrective instruction"],
+                action_repair_attempts += 1
+                action, diagnostic = await self._repair_action(
+                    context,
+                    response.content,
+                    attempt=action_repair_attempts,
                 )
-                context.chain.append_observation(
-                    _agent_result_observation(reflection, AgentRole.REFLECTOR)
+                observation = _action_repair_observation(
+                    response_sha256=response_sha256,
+                    attempts=action_repair_attempts,
+                    repaired_action=action,
+                    diagnostic=diagnostic,
                 )
-                continue
+                context.chain.append_observation(observation)
+                if action is None:
+                    return self._failed(
+                        context,
+                        code="AGENT_ACTION_REPAIR_FAILED",
+                        message=observation.summary,
+                    )
 
             action_fp, loop_detection, strategy_change = loop_guard.inspect_action(action)
             if strategy_change is not None:
@@ -630,6 +689,54 @@ class ModelNativeAgent(NativeAgent):
             code="AGENT_ITERATION_LIMIT",
             message=f"Agent exceeded {self.max_iterations} model iterations",
         )
+
+    async def _repair_action(
+        self,
+        context: AgentRunContext,
+        invalid_content: str,
+        *,
+        attempt: int,
+    ) -> tuple[AgentAction | None, str]:
+        prompt, prompt_version_id = await self.prompts.render(
+            "toolcall_fixer",
+            {
+                "AgentRole": self.descriptor.role.value,
+                "Objective": context.task.objective,
+                "InvalidResponseSha256": hashlib.sha256(
+                    invalid_content.encode("utf-8")
+                ).hexdigest(),
+            },
+        )
+        messages = [
+            LLMMessage(
+                role="system",
+                content=(
+                    f"{prompt}\n\nReturn exactly one corrected Agent action matching this schema; "
+                    "do not return a wrapper or prose."
+                ),
+                metadata={"prompt_key": "toolcall_fixer"},
+            ),
+            LLMMessage(role="user", content=invalid_content),
+        ]
+        try:
+            response = await self.model.complete(
+                messages,
+                stage="agent.toolcall_fixer",
+                model_profile="fallback",
+                run_id=context.task.run_id,
+                flow_id=context.task.flow_id,
+                agent_instance_id=context.instance.instance_id,
+                task_id=context.task.task_id,
+                iteration=attempt,
+                response_schema=AgentAction.model_json_schema(),
+                json_mode=True,
+                prompt_version_id=prompt_version_id,
+            )
+            return parse_agent_action(response.content), "repaired_action_valid"
+        except AgentActionError as error:
+            return None, f"invalid_repair:{type(error.__cause__).__name__}"
+        except Exception as error:
+            return None, f"repair_error:{type(error).__name__}"
 
     @staticmethod
     def _complete(

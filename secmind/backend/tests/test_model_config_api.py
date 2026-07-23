@@ -92,7 +92,7 @@ def test_model_config_hot_swap_drives_runtime_and_usage(client):
 
     assert status == "partial"
     assert report.json()["completion_gate_reason"].startswith(
-        "Finding task requires at least one finding"
+        "Task contract missing expected output(s): findings"
     )
     assert report.json()["executive_summary"] == "模型生成的安全审计摘要"
     assert [event.event_type for event in events if event.event_type.startswith("llm.")] == [

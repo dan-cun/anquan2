@@ -517,10 +517,14 @@ class AgentDispatcher:
         def role_tool_catalog() -> list[UnifiedToolDefinition]:
             if self.tool_gateway is None:
                 return []
+            run_definitions = getattr(self.tool_gateway, "definitions_for_run", None)
             definitions = getattr(self.tool_gateway, "definitions", None)
-            if not callable(definitions):
+            if callable(run_definitions):
+                visible = visible_tool_definitions(descriptor, run_definitions(task.run_id))
+            elif callable(definitions):
+                visible = visible_tool_definitions(descriptor, definitions())
+            else:
                 return []
-            visible = visible_tool_definitions(descriptor, definitions())
             configured = task.metadata.get("allowed_tool_ids")
             if not isinstance(configured, list):
                 return visible
