@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from agents.registry import ROLE_DESCRIPTORS
 from agents.tool_catalog import render_tool_catalog, visible_tool_definitions
+from agents.tool_guidance import _load_guide
 from app.schemas.agents import AgentRole
 from app.schemas.tools import ToolOrigin, UnifiedToolDefinition
 
@@ -56,6 +58,39 @@ def test_rendered_catalog_contains_complete_schemas_and_stable_digest() -> None:
     assert first_digest == second_digest
     assert len(first_digest) == 64
     assert payload["tools"][0]["input_schema"]["required"] == ["query"]
-    assert payload["tools"][0]["output_schema"]["properties"]["documents"] == {
-        "type": "array"
-    }
+    assert payload["tools"][0]["output_schema"]["properties"]["documents"] == {"type": "array"}
+
+
+def test_rendered_catalog_adds_configured_agent_guidance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    guide_path = tmp_path / "tool-guide.json"
+    guide_path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "mcp:research:lookup": {
+                        "what_is_it": "公开资料检索 Tool",
+                        "purpose": "检索资料",
+                        "when_to_use": "需要外部证据时",
+                        "input_data": "query",
+                        "output_data": "documents",
+                        "input_schema": {"duplicated": True},
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SECMIND_TOOL_GUIDE_FILE", str(guide_path))
+    _load_guide.cache_clear()
+
+    rendered, _ = render_tool_catalog(descriptor(AgentRole.SEARCHER), [definition()])
+    payload = json.loads(rendered.split("\n", 1)[1])
+
+    assert payload["tools"][0]["usage_guide"]["when_to_use"] == "需要外部证据时"
+    assert "input_schema" not in payload["tools"][0]["usage_guide"]
+
+    _load_guide.cache_clear()

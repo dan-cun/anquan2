@@ -35,6 +35,35 @@
       "url": "http://host.docker.internal:9014/mcp",
       "enabled": true,
       "metadata": {"node": "local", "category": "data-transformation"}
+    },
+    {
+      "schema_version": "1.0",
+      "server_id": "local-semgrep",
+      "name": "Local Semgrep",
+      "transport": "streamable_http",
+      "url": "http://host.docker.internal:9015/mcp",
+      "enabled": true,
+      "metadata": {"node": "local", "category": "code-security"}
+    },
+    {
+      "schema_version": "1.0",
+      "server_id": "local-wiremcp",
+      "name": "Local WireMCP",
+      "transport": "streamable_http",
+      "url": "http://host.docker.internal:9016/mcp",
+      "enabled": true,
+      "metadata": {"node": "local", "category": "network-forensics"}
+    },
+    {
+      "schema_version": "1.0",
+      "server_id": "local-security-extended",
+      "name": "Local Security Extended",
+      "transport": "streamable_http",
+      "url": "http://host.docker.internal:9017/mcp",
+      "enabled": true,
+      "connect_timeout_seconds": 30,
+      "call_timeout_seconds": 1800,
+      "metadata": {"node": "local", "category": "security-analysis"}
     }
   ]
 }
