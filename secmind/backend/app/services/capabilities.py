@@ -27,6 +27,32 @@ LANGUAGE_BY_SUFFIX = {
     "ts": "typescript",
 }
 
+STATE_TOOL_TERMS = ("notes", "todo", "skill", "context")
+TASK_TOOL_TERMS = {
+    "code_audit": (
+        "bandit",
+        "semgrep",
+        "gitleaks",
+        "osv",
+        "trivy",
+        "independent_verify",
+        *STATE_TOOL_TERMS,
+    ),
+    "web": ("chrome", "http-fetch", "web-security", *STATE_TOOL_TERMS),
+    "crypto": ("cyberchef", *STATE_TOOL_TERMS),
+    "dfir": (
+        "exiftool",
+        "volatility",
+        "tshark",
+        "wiremcp",
+        "pcap",
+        "forensic",
+        *STATE_TOOL_TERMS,
+    ),
+    "pwn": ("pwn", "gdb", *STATE_TOOL_TERMS),
+    "reverse": ("ghidra", "radare", "rizin", "reverse", *STATE_TOOL_TERMS),
+}
+
 
 class CapabilityRouter:
     def route(
@@ -203,33 +229,7 @@ class CapabilityRouter:
         allowed = list(tool_ids)
         if "python" not in languages:
             allowed = [item for item in allowed if "bandit_python_audit" not in item]
-        terms = {
-            "web": ("chrome", "http-fetch", "web-security", "notes", "todo", "skill", "context"),
-            "crypto": ("cyberchef", "notes", "todo", "skill", "context"),
-            "dfir": (
-                "exiftool",
-                "volatility",
-                "tshark",
-                "wiremcp",
-                "pcap",
-                "forensic",
-                "notes",
-                "todo",
-                "skill",
-                "context",
-            ),
-            "pwn": ("pwn", "gdb", "notes", "todo", "skill", "context"),
-            "reverse": (
-                "ghidra",
-                "radare",
-                "rizin",
-                "reverse",
-                "notes",
-                "todo",
-                "skill",
-                "context",
-            ),
-        }.get(task_kind)
+        terms = TASK_TOOL_TERMS.get(task_kind)
         if terms is not None:
             allowed = [item for item in allowed if any(term in item for term in terms)]
         return sorted(allowed)

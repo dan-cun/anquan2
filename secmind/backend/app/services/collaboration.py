@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 from agents.dispatcher import AgentDispatcher
+from agents.native import project_tool_data
 from app.database.repositories import NativeRepositories
 from app.schemas.agents import (
     AgentDelegation,
@@ -41,6 +43,40 @@ from llm.base import LLMMessage, LLMProvider, LLMResponse
 from tools.mcp.gateway import UnifiedToolGateway
 from tools.runtime import RuntimeToolRegistry
 from tools.safety import redact_tool_value, safe_error_message
+
+FINDING_SEVERITY_RANK = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "UNKNOWN": 1}
+
+
+def _deduplicated_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for finding in findings:
+        key = (
+            str(finding.get("rule_id") or "UNKNOWN").upper(),
+            str(finding.get("path") or "unknown").replace("\\", "/"),
+            str(finding.get("line") or ""),
+            str(finding.get("title") or "").strip().lower(),
+        )
+        unique.setdefault(key, finding)
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            -FINDING_SEVERITY_RANK.get(str(item.get("severity") or "UNKNOWN").upper(), 0),
+            str(item.get("path") or ""),
+            int(item.get("line") or 0),
+            str(item.get("rule_id") or ""),
+        ),
+    )
+
+
+def _canonical_sha256(value: Any) -> str:
+    body = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 class NativeDemoLLMProvider(LLMProvider):
@@ -434,7 +470,7 @@ class NativeCollaborationService:
             ).model_dump(mode="json")
             for row in self.repositories.results.list_evidence(run_id)
         ]
-        findings = [
+        raw_findings = [
             Finding(
                 finding_id=row.finding_id,
                 rule_id=row.rule_id,
@@ -450,6 +486,7 @@ class NativeCollaborationService:
             ).model_dump(mode="json")
             for row in self.repositories.results.list_findings(run_id)
         ]
+        findings = _deduplicated_findings(raw_findings)
         tool_calls = [
             {
                 "invocation_id": row.invocation_id,
@@ -462,7 +499,9 @@ class NativeCollaborationService:
                 "arguments": row.arguments_json,
                 "status": row.status,
                 "text_result": row.text_result,
-                "data": row.data_json,
+                "data": project_tool_data(row.data_json),
+                "data_sha256": _canonical_sha256(row.data_json),
+                "data_projected": True,
                 "artifact_refs": row.artifact_refs_json,
                 "evidence_ids": row.evidence_ids_json,
                 "error_code": row.error_code,

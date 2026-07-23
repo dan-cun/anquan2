@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,12 @@ from .actions import (
 from .chains import AgentMessageChain
 from .loop_guard import AgentLoopGuard, LoopGuardConfig
 from .tool_catalog import render_tool_catalog
+
+MAX_OBSERVATION_REFS = 64
+MAX_PROJECTED_FINDINGS = 20
+MAX_PROJECTED_DATA_CHARS = 12_000
+SEVERITY_RANK = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "UNKNOWN": 1}
+CONFIDENCE_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
 
 
 class PromptResolver(Protocol):
@@ -79,45 +86,193 @@ def _merge_unique(target: list[str], values: list[str]) -> None:
             known.add(value)
 
 
+def project_tool_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Build a bounded model-facing view while persistence retains the full result."""
+
+    if not data:
+        return {}
+    raw_size = len(_canonical_json(data))
+    findings = data.get("findings")
+    if isinstance(findings, list):
+        unique = _deduplicate_findings(findings)
+        selected = sorted(unique, key=_finding_sort_key)[:MAX_PROJECTED_FINDINGS]
+        severity_counts: dict[str, int] = {}
+        for finding in unique:
+            severity = str(finding.get("severity") or "UNKNOWN").upper()
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        projection: dict[str, Any] = {
+            "finding_summary": {
+                "reported_count": len(findings),
+                "unique_count": len(unique),
+                "included_count": len(selected),
+                "omitted_count": max(0, len(unique) - len(selected)),
+                "severity_counts": dict(sorted(severity_counts.items())),
+            },
+            "findings": [_project_finding(item) for item in selected],
+        }
+        for key, value in data.items():
+            if key != "findings":
+                projection[key] = _bounded_value(value, 2_000)
+        projection["projection"] = {
+            "version": "tool-observation-v1",
+            "source_sha256": _payload_sha256(data),
+            "source_chars": raw_size,
+            "truncated": len(unique) > len(selected),
+        }
+        return projection
+    if raw_size <= MAX_PROJECTED_DATA_CHARS:
+        return data.copy()
+    return {
+        "projection": {
+            "version": "tool-observation-v1",
+            "source_sha256": _payload_sha256(data),
+            "source_chars": raw_size,
+            "truncated": True,
+        },
+        "keys": sorted(str(key) for key in data),
+        "summary": _bounded_text(_canonical_json(data), MAX_PROJECTED_DATA_CHARS),
+    }
+
+
+def _deduplicate_findings(findings: list[Any]) -> list[dict[str, Any]]:
+    unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for raw in findings:
+        if not isinstance(raw, dict):
+            continue
+        key = (
+            str(raw.get("rule_id") or raw.get("test_id") or "UNKNOWN").upper(),
+            str(raw.get("path") or raw.get("filename") or "unknown").replace("\\", "/"),
+            str(raw.get("line") or raw.get("line_number") or ""),
+            str(raw.get("title") or raw.get("test_name") or "").strip().lower(),
+        )
+        candidate = dict(raw)
+        existing = unique.get(key)
+        if existing is None or _finding_sort_key(candidate) < _finding_sort_key(existing):
+            unique[key] = candidate
+    return list(unique.values())
+
+
+def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, int, str, int, str]:
+    severity = str(
+        finding.get("severity") or finding.get("issue_severity") or "UNKNOWN"
+    ).upper()
+    confidence_value = finding.get("confidence") or finding.get("issue_confidence") or "UNKNOWN"
+    if isinstance(confidence_value, (int, float)):
+        confidence = round(float(confidence_value) * 3)
+    else:
+        confidence = CONFIDENCE_RANK.get(str(confidence_value).upper(), 0)
+    path = str(finding.get("path") or finding.get("filename") or "unknown")
+    line = int(finding.get("line") or finding.get("line_number") or 0)
+    rule_id = str(finding.get("rule_id") or finding.get("test_id") or "UNKNOWN")
+    return (-SEVERITY_RANK.get(severity, 0), -confidence, path, line, rule_id)
+
+
+def _project_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    evidence_ids = finding.get("evidence_ids")
+    return {
+        "finding_id": finding.get("finding_id"),
+        "rule_id": finding.get("rule_id") or finding.get("test_id") or "UNKNOWN",
+        "severity": str(
+            finding.get("severity") or finding.get("issue_severity") or "UNKNOWN"
+        ).upper(),
+        "confidence": finding.get("confidence") or finding.get("issue_confidence") or "UNKNOWN",
+        "path": finding.get("path") or finding.get("filename") or "unknown",
+        "line": finding.get("line") or finding.get("line_number"),
+        "title": _bounded_text(
+            str(finding.get("title") or finding.get("test_name") or "Finding"), 240
+        ),
+        "description": _bounded_text(
+            str(finding.get("description") or finding.get("issue_text") or ""), 600
+        ),
+        "remediation": _bounded_text(str(finding.get("remediation") or ""), 400),
+        "evidence_ids": (
+            [str(item) for item in evidence_ids[:8]] if isinstance(evidence_ids, list) else []
+        ),
+    }
+
+
+def _bounded_value(value: Any, limit: int) -> Any:
+    serialized = _canonical_json(value)
+    if len(serialized) <= limit:
+        return value
+    return {
+        "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "source_chars": len(serialized),
+        "summary": _bounded_text(serialized, limit),
+        "truncated": True,
+    }
+
+
+def _payload_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
+
+
 def _agent_result_observation(result: AgentResult, role: AgentRole) -> AgentObservation:
+    projected_data = project_tool_data(result.data)
     report = AgentFinalReport(
         agent_instance_id=result.agent_instance_id,
         task_id=result.task_id,
         status=result.status.value,
         summary=result.summary,
-        data=result.data,
-        artifact_refs=result.artifact_refs,
-        evidence_ids=result.evidence_ids,
-        finding_ids=result.finding_ids,
+        data=projected_data,
+        artifact_refs=result.artifact_refs[:MAX_OBSERVATION_REFS],
+        evidence_ids=result.evidence_ids[:MAX_OBSERVATION_REFS],
+        finding_ids=result.finding_ids[:MAX_OBSERVATION_REFS],
         error_code=result.error_code,
         error_message=result.error_message,
     )
     return AgentObservation(
         source="agent",
         source_id=result.agent_instance_id,
-        summary=result.summary or result.error_message or f"{role.value} returned no summary",
+        summary=_bounded_text(
+            result.summary or result.error_message or f"{role.value} returned no summary",
+            1_200,
+        ),
         status=result.status.value,
-        artifact_refs=result.artifact_refs,
-        evidence_ids=result.evidence_ids,
-        finding_ids=result.finding_ids,
+        artifact_refs=result.artifact_refs[:MAX_OBSERVATION_REFS],
+        evidence_ids=result.evidence_ids[:MAX_OBSERVATION_REFS],
+        finding_ids=result.finding_ids[:MAX_OBSERVATION_REFS],
         final_report=report,
-        metadata={"delegated_role": role.value},
+        metadata={
+            "delegated_role": role.value,
+            "artifact_ref_count": len(result.artifact_refs),
+            "evidence_id_count": len(result.evidence_ids),
+            "finding_id_count": len(result.finding_ids),
+        },
     )
 
 
 def _tool_result_observation(result: UnifiedToolResult) -> AgentObservation:
+    projected_data = project_tool_data(result.data)
     return AgentObservation(
         source="tool",
         source_id=result.invocation_id,
-        summary=result.text or result.error_message or f"{result.tool_id} returned no summary",
+        summary=_bounded_text(
+            result.text or result.error_message or f"{result.tool_id} returned no summary",
+            1_200,
+        ),
         status=result.status.value,
-        data=result.data,
-        artifact_refs=result.artifact_refs,
-        evidence_ids=result.evidence_ids,
+        data=projected_data,
+        artifact_refs=result.artifact_refs[:MAX_OBSERVATION_REFS],
+        evidence_ids=result.evidence_ids[:MAX_OBSERVATION_REFS],
         metadata={
             "tool_id": result.tool_id,
             "error_code": result.error_code,
             "duration_ms": result.duration_ms,
+            "artifact_ref_count": len(result.artifact_refs),
+            "evidence_id_count": len(result.evidence_ids),
+            "projection_chars": len(_canonical_json(projected_data)),
+            "source_data_sha256": _payload_sha256(result.data),
         },
     )
 
@@ -306,6 +461,7 @@ class ModelNativeAgent(NativeAgent):
             catalog_text, catalog_digest = render_tool_catalog(
                 self.descriptor,
                 context.tool_catalog(),
+                compact=True,
             )
             request_messages = list(context.chain.messages)
             request_messages.insert(
