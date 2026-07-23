@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,10 +90,100 @@ def test_benchmark_cleanup_targets_isolated_sqlite_and_preserves_configuration()
     script = _benchmark_cleanup_script()
 
     assert "/app/data/benchmark.db" in script
-    assert "runtime_runs" in script
-    assert "checkpoint_writes" in script
+    assert "import sqlite3" in script
+    assert "PRAGMA foreign_key_check" in script
     for table in ("prompts", "prompt_versions", "mcp_servers", "mcp_capabilities", "skills"):
         assert f'"{table}"' not in script
+
+
+def test_benchmark_cleanup_removes_flow_graph_with_self_referencing_agents(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "benchmark.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE flows (id TEXT PRIMARY KEY);
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE agent_instances (
+            instance_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE RESTRICT,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+            parent_instance_id TEXT REFERENCES agent_instances(instance_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE message_chains (
+            chain_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            flow_id TEXT NOT NULL REFERENCES flows(id) ON DELETE RESTRICT,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+            agent_instance_id TEXT REFERENCES agent_instances(instance_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE message_entries (
+            entry_id TEXT PRIMARY KEY,
+            chain_id TEXT NOT NULL REFERENCES message_chains(chain_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE runtime_runs (
+            run_id TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL
+        );
+        CREATE TABLE prompts (prompt_key TEXT PRIMARY KEY);
+        INSERT INTO flows VALUES ('flow-1');
+        INSERT INTO tasks VALUES ('task-1', 'flow-1');
+        INSERT INTO agent_instances VALUES
+            ('agent-parent', 'run-1', 'flow-1', 'task-1', NULL),
+            ('agent-child', 'run-1', 'flow-1', 'task-1', 'agent-parent');
+        INSERT INTO message_chains VALUES
+            ('chain-1', 'run-1', 'flow-1', 'task-1', 'agent-child');
+        INSERT INTO message_entries VALUES ('entry-1', 'chain-1');
+        INSERT INTO runtime_runs VALUES
+            ('run-1', '{"flow_id":"flow-1","task_id":"task-1"}');
+        INSERT INTO prompts VALUES ('global-prompt');
+        """
+    )
+    connection.close()
+
+    runs_root = tmp_path / "runs"
+    uploads_root = tmp_path / "uploads"
+    (runs_root / "run-1").mkdir(parents=True)
+    uploads_root.mkdir()
+    (uploads_root / "upload.zip").write_bytes(b"input")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _benchmark_cleanup_script(),
+            "run-1",
+            "upload.zip",
+            str(database),
+            str(runs_root),
+            str(uploads_root),
+        ],
+        check=True,
+    )
+
+    connection = sqlite3.connect(database)
+    for table in (
+        "runtime_runs",
+        "message_entries",
+        "message_chains",
+        "agent_instances",
+        "tasks",
+        "flows",
+    ):
+        assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert connection.execute("SELECT prompt_key FROM prompts").fetchone() == (
+        "global-prompt",
+    )
+    assert list(connection.execute("PRAGMA foreign_key_check")) == []
+    connection.close()
+    assert not (runs_root / "run-1").exists()
+    assert not (uploads_root / "upload.zip").exists()
 
 
 def test_token_usage_accepts_openai_aliases() -> None:

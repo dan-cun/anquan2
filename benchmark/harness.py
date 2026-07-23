@@ -736,9 +736,14 @@ import sys
 from pathlib import Path
 
 run_id, upload_ref = sys.argv[1], sys.argv[2]
+database = Path(sys.argv[3]) if len(sys.argv) > 3 else Path('/app/data/benchmark.db')
+runs_root = Path(sys.argv[4]) if len(sys.argv) > 4 else Path('/app/data/runs')
+uploads_root = Path(sys.argv[5]) if len(sys.argv) > 5 else Path('/app/data/uploads')
 tables = json.loads('@@TABLES@@')
-database = Path('/app/data/benchmark.db')
 connection = sqlite3.connect(database)
+
+def quoted(name):
+    return '"' + name.replace('"', '""') + '"'
 
 def has_table(name):
     row = connection.execute(
@@ -747,32 +752,74 @@ def has_table(name):
     ).fetchone()
     return row is not None
 
-def quoted(name):
-    return '"' + name.replace('"', '""') + '"'
+def columns(name):
+    return {str(row[1]) for row in connection.execute(
+        'PRAGMA table_info(%s)' % quoted(name)
+    )}
+
+def values_for(query, parameters):
+    return tuple(str(row[0]) for row in connection.execute(query, parameters))
+
+def delete_in(table, column, values):
+    if not values or not has_table(table) or column not in columns(table):
+        return
+    placeholders = ','.join('?' for _ in values)
+    connection.execute(
+        'DELETE FROM %s WHERE %s IN (%s)' % (
+            quoted(table), quoted(column), placeholders
+        ),
+        values,
+    )
 
 try:
-    connection.execute('PRAGMA foreign_keys = ON')
+    connection.execute('PRAGMA foreign_keys = OFF')
     connection.execute('BEGIN IMMEDIATE')
-    if has_table('message_entries') and has_table('message_chains'):
-        connection.execute(
-            'DELETE FROM message_entries WHERE chain_id IN '
-            '(SELECT chain_id FROM message_chains WHERE run_id = ?)',
+    state_row = None
+    if has_table('runtime_runs'):
+        state_row = connection.execute(
+            'SELECT state_json FROM runtime_runs WHERE run_id = ?',
+            (run_id,),
+        ).fetchone()
+    state = json.loads(str(state_row[0])) if state_row else {}
+    flow_id = str(state.get('flow_id') or '')
+
+    task_ids = ()
+    if flow_id and has_table('tasks'):
+        task_ids = values_for('SELECT id FROM tasks WHERE flow_id = ?', (flow_id,))
+    subtask_ids = ()
+    if task_ids and has_table('subtasks'):
+        placeholders = ','.join('?' for _ in task_ids)
+        subtask_ids = values_for(
+            'SELECT id FROM subtasks WHERE task_id IN (%s)' % placeholders,
+            task_ids,
+        )
+    chain_ids = ()
+    if has_table('message_chains'):
+        chain_ids = values_for(
+            'SELECT chain_id FROM message_chains WHERE run_id = ?',
             (run_id,),
         )
+
+    delete_in('message_entries', 'chain_id', chain_ids)
     for table in tables:
-        if has_table(table):
-            connection.execute(
-                'DELETE FROM %s WHERE run_id = ?' % quoted(table),
-                (run_id,),
-            )
+        delete_in(table, 'run_id', (run_id,))
+    for table in ('tool_calls', 'message_chains', 'findings'):
+        delete_in(table, 'subtask_id', subtask_ids)
+    delete_in('subtasks', 'task_id', task_ids)
+    delete_in('tasks', 'id', task_ids)
+    delete_in('flows', 'id', (flow_id,) if flow_id else ())
     for table in ('checkpoint_writes', 'checkpoint_blobs', 'checkpoints'):
-        if has_table(table):
-            connection.execute(
-                'DELETE FROM %s WHERE thread_id = ?' % quoted(table),
-                (run_id,),
-            )
+        delete_in(table, 'thread_id', (run_id,))
+
+    violations = list(connection.execute('PRAGMA foreign_key_check'))
+    if violations:
+        table, row_id, parent, _ = violations[0]
+        raise RuntimeError(
+            'cleanup violates foreign key: %s row %s references %s'
+            % (table, row_id, parent)
+        )
     for table in tables:
-        if has_table(table):
+        if has_table(table) and 'run_id' in columns(table):
             remaining = connection.execute(
                 'SELECT 1 FROM %s WHERE run_id = ? LIMIT 1' % quoted(table),
                 (run_id,),
@@ -786,11 +833,11 @@ except Exception:
 finally:
     connection.close()
 
-for root_text, name, recursive in (
-    ('/app/data/runs', run_id, True),
-    ('/app/data/uploads', upload_ref, False),
+for root, name, recursive in (
+    (runs_root, run_id, True),
+    (uploads_root, upload_ref, False),
 ):
-    root = Path(root_text).resolve()
+    root = root.resolve()
     target = (root / name).resolve()
     if target.parent != root:
         raise SystemExit('unsafe cleanup target: %s' % target)
