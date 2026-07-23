@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.schemas.runtime import AgentState, AttachmentRef, TaskRequest
-from benchmark_gates import checkpoint_gate, cleanup_gate
+from benchmark_gates import _canary_settings, checkpoint_gate, cleanup_gate
 from ledger.runtime_store import RuntimeLedgerStore
 
 
@@ -20,6 +20,18 @@ def test_checkpoint_gate_completes_one_hundred_serialization_roundtrips() -> Non
 def test_checkpoint_gate_rejects_non_positive_iterations() -> None:
     with pytest.raises(ValueError, match="positive"):
         checkpoint_gate(0)
+
+
+def test_canary_uses_an_isolated_ephemeral_runtime(tmp_path) -> None:
+    settings = _canary_settings(tmp_path)
+
+    assert settings.resolved_database_url == f"sqlite:///{(tmp_path / 'canary.db').as_posix()}"
+    assert settings.resolved_ledger_dir == tmp_path / "ledger"
+    assert settings.resolved_runtime_input_root == tmp_path / "inputs"
+    assert settings.resolved_runtime_run_root == tmp_path / "runs"
+    assert settings.resolved_runtime_upload_root == tmp_path / "uploads"
+    assert settings.checkpoint_backend == "memory"
+    assert settings.projection_enabled is False
 
 
 def test_cleanup_gate_only_removes_isolated_sqlite_run(tmp_path, monkeypatch) -> None:

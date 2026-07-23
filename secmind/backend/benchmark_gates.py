@@ -8,6 +8,7 @@ import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
@@ -200,53 +201,69 @@ def cleanup_gate(run_id: str) -> dict[str, Any]:
     return result
 
 
+def _canary_settings(root: Path) -> Settings:
+    database_url = f"sqlite:///{(root / 'canary.db').as_posix()}"
+    return Settings(
+        data_dir=root,
+        ledger_dir=root / "ledger",
+        database_url=database_url,
+        runtime_database_url=database_url,
+        runtime_input_root=root / "inputs",
+        runtime_run_root=root / "runs",
+        runtime_upload_root=root / "uploads",
+        checkpoint_backend="memory",
+        projection_enabled=False,
+    )
+
+
 async def model_canary_gate() -> dict[str, Any]:
-    settings = Settings()
     role_results: list[dict[str, Any]] = []
-    async with open_services(settings) as services:
-        metadata = services.llm_provider.metadata()
-        for role in CANARY_ROLES:
-            flow = services.flows.create_flow(title=f"Benchmark canary: {role.value}")
-            run_id = str(uuid4())
-            error_type: str | None = None
-            status = "failed"
-            try:
-                _, result = await services.collaboration.submit(
-                    flow_id=flow.id,
-                    run_id=run_id,
-                    objective=(
-                        "This is a model transport canary. Do not use tools or delegate. "
-                        "Return one valid complete action with the summary 'canary ok'."
-                    ),
-                    expected_outputs=["valid AgentAction JSON"],
-                    metadata={
-                        "benchmark_gate": "four-role-canary",
-                        "allowed_tool_ids": [],
-                    },
-                    role=role,
+    with TemporaryDirectory(prefix="secmind-canary-") as directory:
+        settings = _canary_settings(Path(directory))
+        async with open_services(settings) as services:
+            metadata = services.llm_provider.metadata()
+            for role in CANARY_ROLES:
+                flow = services.flows.create_flow(title=f"Benchmark canary: {role.value}")
+                run_id = str(uuid4())
+                error_type: str | None = None
+                status = "failed"
+                try:
+                    _, result = await services.collaboration.submit(
+                        flow_id=flow.id,
+                        run_id=run_id,
+                        objective=(
+                            "This is a model transport canary. Do not use tools or delegate. "
+                            "Return one valid complete action with the summary 'canary ok'."
+                        ),
+                        expected_outputs=["valid AgentAction JSON"],
+                        metadata={
+                            "benchmark_gate": "four-role-canary",
+                            "allowed_tool_ids": [],
+                        },
+                        role=role,
+                    )
+                    status = result.status.value
+                except Exception as error:
+                    error_type = type(error).__name__
+                events = services.runtime_ledger.events(run_id, limit=1_000_000)
+                request_count = sum(item.event_type == "llm.request" for item in events)
+                http_400_count = sum(
+                    item.event_type == "llm.error"
+                    and isinstance(item.payload.get("diagnostics"), dict)
+                    and item.payload["diagnostics"].get("status_code") == 400
+                    for item in events
                 )
-                status = result.status.value
-            except Exception as error:
-                error_type = type(error).__name__
-            events = services.runtime_ledger.events(run_id, limit=1_000_000)
-            request_count = sum(item.event_type == "llm.request" for item in events)
-            http_400_count = sum(
-                item.event_type == "llm.error"
-                and isinstance(item.payload.get("diagnostics"), dict)
-                and item.payload["diagnostics"].get("status_code") == 400
-                for item in events
-            )
-            role_results.append(
-                {
-                    "role": role.value,
-                    "run_id": run_id,
-                    "status": status,
-                    "request_count": request_count,
-                    "http_400_count": http_400_count,
-                    "ledger_valid": services.runtime_ledger.verify(run_id),
-                    "error_type": error_type,
-                }
-            )
+                role_results.append(
+                    {
+                        "role": role.value,
+                        "run_id": run_id,
+                        "status": status,
+                        "request_count": request_count,
+                        "http_400_count": http_400_count,
+                        "ledger_valid": services.runtime_ledger.verify(run_id),
+                        "error_type": error_type,
+                    }
+                )
     passed = bool(metadata.get("configured")) and all(
         item["request_count"] > 0
         and item["http_400_count"] == 0
