@@ -29,7 +29,7 @@ from app.schemas.runtime import (
 )
 from app.services.runtime import RuntimeEventHub, RuntimeRunService
 from ledger.runtime_store import RuntimeLedgerStore
-from llm.base import LLMResponse, ProviderHTTPError
+from llm.base import EmptyContentReason, LLMResponse, ProviderHTTPError
 from tools.runtime import RuntimeTool, RuntimeToolBroker, RuntimeToolRegistry
 
 
@@ -385,6 +385,83 @@ async def test_model_budget_caps_managed_calls(tmp_path: Path) -> None:
     assert model.stages == ["universal_primary", "plan"]
     assert state.report is not None
     assert state.report.executive_summary == "Universal Primary completed."
+
+
+@pytest.mark.asyncio
+async def test_structured_runtime_output_retries_reasoning_only_with_stage_override(
+    tmp_path: Path,
+) -> None:
+    runtime, _, model = build_runtime(tmp_path)
+    runtime.settings.llm_primary_thinking_enabled = True
+    state = runtime.new_state(audit_task(), "structured-runtime-run")
+    responses = [
+        LLMResponse(
+            content="",
+            model="controlled-model",
+            provider="controlled",
+            finish_reason="length",
+            empty_content_reason=EmptyContentReason.LENGTH_REASONING_ONLY,
+        ),
+        LLMResponse(
+            content=json.dumps(
+                {
+                    "status": "success",
+                    "final_answer": None,
+                    "executive_summary": "Structured result recovered.",
+                    "findings": [],
+                    "evidence_gaps": [],
+                    "confidence": 0.9,
+                    "limitations": [],
+                }
+            ),
+            model="controlled-model",
+            provider="controlled",
+        ),
+    ]
+    requests: list[dict[str, Any]] = []
+
+    async def complete(messages: list[Any], **kwargs: Any) -> LLMResponse:
+        del messages
+        requests.append(kwargs.copy())
+        return responses.pop(0)
+
+    model.complete = complete  # type: ignore[method-assign]
+    result = await runtime._call_model(
+        state,
+        stage="universal_primary",
+        system="Return one structured result.",
+        payload={"objective": "test"},
+        max_tokens=100,
+        response_model=UniversalPrimaryResult,
+    )
+
+    assert isinstance(result, UniversalPrimaryResult)
+    assert result.executive_summary == "Structured result recovered."
+    assert requests[0]["thinking_enabled"] is True
+    assert requests[1]["thinking_enabled"] is False
+    assert "reasoning_effort" not in requests[1]
+    assert state.budget.model_calls_used == 2
+
+
+@pytest.mark.asyncio
+async def test_prompt_budget_blocks_oversized_model_request(tmp_path: Path) -> None:
+    runtime, _, model = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "prompt-budget-run")
+    state.budget.max_single_prompt_tokens = 1
+
+    result = await runtime._call_model(
+        state,
+        stage="plan",
+        system="This prompt cannot fit the configured budget.",
+        payload={"objective": "test"},
+        max_tokens=10,
+    )
+
+    assert result is None
+    assert model.stages == []
+    assert state.budget.model_calls_used == 0
+    assert state.budget.max_prompt_tokens_seen > 1
+    assert any(item.decision == "model_plan_fallback" for item in state.decisions)
 
 
 @pytest.mark.asyncio

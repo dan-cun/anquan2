@@ -414,14 +414,24 @@ class PlanStep(BaseModel):
     max_attempts: int = Field(default=2, ge=1, le=5)
 
 
+class PlanResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[PlanStep] = Field(default_factory=list)
+
+
 class BudgetState(BaseModel):
     max_steps: int = 12
     max_tool_calls: int = 12
     max_model_calls: int = 20
     max_runtime_seconds: int = 600
+    max_single_prompt_tokens: int = 32_000
+    max_total_prompt_tokens: int = 100_000
     steps_used: int = 0
     tool_calls_used: int = 0
     model_calls_used: int = 0
+    prompt_tokens_used: int = 0
+    max_prompt_tokens_seen: int = 0
 
 
 class Evidence(BaseModel):

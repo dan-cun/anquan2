@@ -8,8 +8,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import ceil
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+from pydantic import BaseModel
 
 from agents.guardrail import GuardrailAction
 from app.core.config import Settings
@@ -29,6 +32,7 @@ from app.schemas.runtime import (
     ExecutionReceipt,
     Finding,
     KnowledgeHit,
+    PlanResult,
     PlanStep,
     RiskLevel,
     RunStatus,
@@ -51,6 +55,7 @@ from knowledge.models import VerifierAttestation
 from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import LLMMessage, ProviderHTTPError
 from llm.manager import LLMProviderManager
+from llm.structured_output import StructuredOutputError, parse_structured_output
 from tools.runtime import RuntimeToolBroker
 from tools.safety import redact_tool_value, safe_error_message
 
@@ -329,6 +334,8 @@ class RuntimeRunService:
                 max_tool_calls=self.settings.runtime_max_tool_calls,
                 max_model_calls=self.settings.runtime_max_model_calls,
                 max_runtime_seconds=self.settings.runtime_max_runtime_seconds,
+                max_single_prompt_tokens=self.settings.llm_max_single_prompt_tokens,
+                max_total_prompt_tokens=self.settings.llm_max_run_prompt_tokens,
             ),
         )
 
@@ -455,7 +462,7 @@ class RuntimeRunService:
                 error_type=failure["error_type"],
                 error_message=failure["error_message"],
             )
-        response = await self._call_model(
+        result = await self._call_model(
             state,
             stage="universal_primary",
             system=(
@@ -479,13 +486,11 @@ class RuntimeRunService:
                 "relevant_workspace_chunks": chunks,
             },
             max_tokens=4_000,
-            response_schema=UniversalPrimaryResult.model_json_schema(),
+            response_model=UniversalPrimaryResult,
         )
-        try:
-            result = UniversalPrimaryResult.model_validate_json(response) if response else None
-        except ValueError as error:
+        if result is not None and not isinstance(result, UniversalPrimaryResult):
+            state.last_error = "Universal Primary output invalid: unexpected result type"
             result = None
-            state.last_error = f"Universal Primary output invalid: {type(error).__name__}"
         if result is None:
             message = state.last_error or "Universal Primary model did not return a valid result"
             result = UniversalPrimaryResult(
@@ -626,8 +631,9 @@ class RuntimeRunService:
                 "allowed_tools": [item.model_dump(mode="json") for item in manifests],
             },
             max_tokens=1200,
+            response_model=PlanResult,
         )
-        plan = self._parse_plan(response) if response else None
+        plan = response.steps if isinstance(response, PlanResult) else None
         state.plan = plan if plan is not None else fallback
         source = "managed-llm" if plan is not None else "deterministic-fallback"
         state.decisions.append(
@@ -1465,8 +1471,9 @@ class RuntimeRunService:
         system: str,
         payload: dict[str, Any],
         max_tokens: int,
+        response_model: type[BaseModel] | None = None,
         response_schema: dict[str, Any] | None = None,
-    ) -> str | None:
+    ) -> str | BaseModel | None:
         metadata = self.llm_provider.metadata()
         if not metadata.get("configured"):
             await self._record_model_fallback(state, stage, "provider_unconfigured")
@@ -1484,12 +1491,32 @@ class RuntimeRunService:
         ]
         provider_kwargs: dict[str, Any] = {
             "stage": stage,
-            "temperature": 0.1,
+            "temperature": self.settings.llm_temperature,
             "max_tokens": max_tokens,
         }
+        if response_model is not None:
+            response_schema = response_model.model_json_schema()
         if response_schema is not None:
             provider_kwargs["response_schema"] = response_schema
             provider_kwargs["json_mode"] = True
+        thinking_enabled = self._stage_thinking_enabled(stage)
+        provider_kwargs["thinking_enabled"] = thinking_enabled
+        if thinking_enabled:
+            provider_kwargs["reasoning_effort"] = self.settings.llm_reasoning_effort
+        prompt_tokens = self._estimate_prompt_tokens(messages, response_schema)
+        state.budget.max_prompt_tokens_seen = max(
+            state.budget.max_prompt_tokens_seen,
+            prompt_tokens,
+        )
+        if prompt_tokens > state.budget.max_single_prompt_tokens:
+            await self._record_prompt_budget_exhausted(
+                state,
+                stage,
+                budget="single_prompt",
+                requested=prompt_tokens,
+                limit=state.budget.max_single_prompt_tokens,
+            )
+            return None
         # Keep report usage in the provider ledger while preserving per-attempt
         # stage I/O for every other graph model call.
         if stage == "report":
@@ -1501,6 +1528,17 @@ class RuntimeRunService:
             state.budget.max_model_calls - state.budget.model_calls_used,
         )
         for attempt in range(1, max_attempts + 1):
+            projected_prompt_tokens = state.budget.prompt_tokens_used + prompt_tokens
+            if projected_prompt_tokens > state.budget.max_total_prompt_tokens:
+                await self._record_prompt_budget_exhausted(
+                    state,
+                    stage,
+                    budget="total_prompt",
+                    requested=projected_prompt_tokens,
+                    limit=state.budget.max_total_prompt_tokens,
+                )
+                return None
+            state.budget.prompt_tokens_used += prompt_tokens
             state.budget.model_calls_used += 1
             if stage != "report":
                 await self._event(
@@ -1572,13 +1610,113 @@ class RuntimeRunService:
                     },
                     actor="llm_provider",
                 )
+            actual_prompt_tokens = response.usage.prompt_tokens
+            if actual_prompt_tokens > prompt_tokens:
+                state.budget.prompt_tokens_used += actual_prompt_tokens - prompt_tokens
+                state.budget.max_prompt_tokens_seen = max(
+                    state.budget.max_prompt_tokens_seen,
+                    actual_prompt_tokens,
+                )
+            if response_model is not None:
+                try:
+                    return parse_structured_output(response, response_model)
+                except StructuredOutputError as error:
+                    diagnostics = error.diagnostics
+                    await self._event(
+                        state,
+                        f"model.{stage}.structured_error",
+                        {
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "diagnostics": diagnostics.model_dump(mode="json"),
+                        },
+                        actor="runtime",
+                    )
+                    if diagnostics.retryable and attempt < max_attempts:
+                        provider_kwargs.update(diagnostics.suggested_overrides)
+                        provider_kwargs.pop("reasoning_effort", None)
+                        state.decisions.append(
+                            DecisionRecord(
+                                decision=f"retry_model_{stage}_structured_output",
+                                rationale_summary=(
+                                    "Structured output diagnostics requested one bounded retry "
+                                    "with stage thinking disabled."
+                                ),
+                                policy_ids=["MODEL-STRUCTURED-RETRY-V1"],
+                                model_id=str(
+                                    metadata.get("model")
+                                    or metadata.get("name")
+                                    or "unknown"
+                                ),
+                            )
+                        )
+                        continue
+                    await self._record_model_fallback(
+                        state,
+                        stage,
+                        f"structured_{diagnostics.code}",
+                    )
+                    return None
             content = response.content.strip()
             if content:
                 return content
+            if response.should_retry_without_thinking and attempt < max_attempts:
+                provider_kwargs["thinking_enabled"] = False
+                provider_kwargs.pop("reasoning_effort", None)
+                continue
             await self._record_model_fallback(state, stage, "empty_response")
             return None
         await self._record_model_fallback(state, stage, "attempt_limit_exhausted")
         return None
+
+    async def _record_prompt_budget_exhausted(
+        self,
+        state: AgentState,
+        stage: str,
+        *,
+        budget: str,
+        requested: int,
+        limit: int,
+    ) -> None:
+        await self._event(
+            state,
+            "budget.exhausted",
+            {
+                "budget": budget,
+                "stage": stage,
+                "requested_prompt_tokens": requested,
+                "limit_prompt_tokens": limit,
+            },
+            actor="runtime",
+        )
+        await self._record_model_fallback(state, stage, f"{budget}_budget_exhausted")
+
+    def _stage_thinking_enabled(self, stage: str) -> bool:
+        configured = {
+            "universal_primary": self.settings.llm_primary_thinking_enabled,
+            "plan": self.settings.llm_plan_thinking_enabled,
+            "analyze": self.settings.llm_analyze_thinking_enabled,
+            "verify": self.settings.llm_verify_thinking_enabled,
+            "report": self.settings.llm_report_thinking_enabled,
+        }
+        return configured.get(stage, self.settings.llm_thinking_enabled)
+
+    @staticmethod
+    def _estimate_prompt_tokens(
+        messages: list[LLMMessage],
+        response_schema: dict[str, Any] | None,
+    ) -> int:
+        character_count = sum(len(message.content or "") for message in messages)
+        if response_schema is not None:
+            character_count += len(
+                json.dumps(
+                    response_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        return ceil(character_count / 4)
 
     async def _record_model_fallback(
         self,

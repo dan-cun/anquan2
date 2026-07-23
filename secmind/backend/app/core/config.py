@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_thinking_enabled: bool = True
     llm_reasoning_effort: Literal["high", "max"] = "max"
+    llm_primary_thinking_enabled: bool = False
+    llm_plan_thinking_enabled: bool = False
+    llm_analyze_thinking_enabled: bool = False
+    llm_verify_thinking_enabled: bool = False
+    llm_report_thinking_enabled: bool = False
+    llm_max_single_prompt_tokens: int = Field(default=32_000, ge=1)
+    llm_max_run_prompt_tokens: int = Field(default=100_000, ge=1)
 
     qdrant_enabled: bool = False
     qdrant_url: str = "http://127.0.0.1:6333"

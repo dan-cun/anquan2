@@ -7,6 +7,18 @@ from llm.factory import build_llm_provider
 from llm.openai_compatible import OpenAICompatibleProvider
 
 
+def test_runtime_model_stage_defaults_are_bounded() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_primary_thinking_enabled is False
+    assert settings.llm_plan_thinking_enabled is False
+    assert settings.llm_analyze_thinking_enabled is False
+    assert settings.llm_verify_thinking_enabled is False
+    assert settings.llm_report_thinking_enabled is False
+    assert settings.llm_max_single_prompt_tokens == 32_000
+    assert settings.llm_max_run_prompt_tokens == 100_000
+
+
 def test_qwen_provider_configured(tmp_path):
     settings = Settings(
         data_dir=tmp_path / "data",

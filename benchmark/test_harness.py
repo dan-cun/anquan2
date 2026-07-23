@@ -315,6 +315,18 @@ def test_repository_runtime_contract_declares_reliable_kernel() -> None:
     ]
     assert kernel["model_max_attempts_env"] == "SECMIND_LLM_MAX_ATTEMPTS"
     assert kernel["default_model_max_attempts"] == 2
+    assert kernel["prompt_budget"] == {
+        "max_single_prompt_tokens": 32_000,
+        "max_run_prompt_tokens": 100_000,
+        "estimator": "ceil(message_and_schema_chars/4)",
+    }
+    assert kernel["stage_thinking_defaults"] == {
+        "universal_primary": False,
+        "plan": False,
+        "analyze": False,
+        "verify": False,
+        "report": False,
+    }
     assert kernel["tool_retry_policy"] == "idempotent_only"
     assert kernel["completion_gate_checks"] == [
         "review_converged",

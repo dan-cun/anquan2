@@ -46,6 +46,18 @@
     ],
     "model_max_attempts_env": "SECMIND_LLM_MAX_ATTEMPTS",
     "default_model_max_attempts": 2,
+    "prompt_budget": {
+      "max_single_prompt_tokens": 32000,
+      "max_run_prompt_tokens": 100000,
+      "estimator": "ceil(message_and_schema_chars/4)"
+    },
+    "stage_thinking_defaults": {
+      "universal_primary": false,
+      "plan": false,
+      "analyze": false,
+      "verify": false,
+      "report": false
+    },
     "tool_retry_policy": "idempotent_only",
     "completion_gate_checks": [
       "review_converged",
