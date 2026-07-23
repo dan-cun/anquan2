@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -42,6 +43,14 @@ EventPublisher = Callable[
 ]
 ContextProvider = Callable[[str, str | None], dict[str, Any]]
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class AgentRunControl:
+    max_agents: int
+    soft_deadline_at: datetime
+    tool_grace_deadline_at: datetime
+    hard_deadline_at: datetime
 
 
 async def _noop_publisher(
@@ -95,7 +104,55 @@ class AgentDispatcher:
         self._completion_events: dict[str, asyncio.Event] = {}
         self._stop_requests: dict[str, str] = {}
         self._background_tasks: set[asyncio.Task[AgentResult]] = set()
+        self._background_task_runs: dict[asyncio.Task[AgentResult], str] = {}
+        self._run_controls: dict[str, AgentRunControl] = {}
         self._lock = asyncio.Lock()
+
+    def configure_run(
+        self,
+        run_id: str,
+        *,
+        max_agents: int,
+        soft_deadline_at: datetime,
+        tool_grace_deadline_at: datetime,
+        hard_deadline_at: datetime,
+    ) -> None:
+        if max_agents < 1:
+            raise ValueError("max_agents must be positive")
+        if soft_deadline_at >= hard_deadline_at:
+            raise ValueError("soft_deadline_at must be before hard_deadline_at")
+        if not soft_deadline_at <= tool_grace_deadline_at <= hard_deadline_at:
+            raise ValueError("tool_grace_deadline_at must be between soft and hard deadlines")
+        self._run_controls[run_id] = AgentRunControl(
+            max_agents=max_agents,
+            soft_deadline_at=soft_deadline_at,
+            tool_grace_deadline_at=tool_grace_deadline_at,
+            hard_deadline_at=hard_deadline_at,
+        )
+
+    def clear_run_control(self, run_id: str) -> None:
+        self._run_controls.pop(run_id, None)
+
+    async def cancel_run(self, run_id: str, *, reason: str) -> None:
+        terminal = {AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.CANCELLED}
+        roots = [
+            item
+            for item in self._instances.values()
+            if item.run_id == run_id
+            and item.parent_instance_id is None
+            and item.status not in terminal
+        ]
+        for root in roots:
+            await self.stop_agent(root.instance_id, reason=reason)
+        tasks = [
+            task
+            for task, task_run_id in self._background_task_runs.items()
+            if task_run_id == run_id and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def dispatch_root(self, role: AgentRole, task: AgentTask) -> AgentResult:
         return await self._dispatch(role, task, parent_instance_id=None, depth=0)
@@ -110,7 +167,7 @@ class AgentDispatcher:
             depth=0,
             ready=ready,
         )
-        self._track_background(background)
+        self._track_background(background, task.run_id)
         return await ready
 
     async def delegate_from(
@@ -140,7 +197,7 @@ class AgentDispatcher:
         depth = int(parent.metadata.get("delegation_depth", 0)) + 1
         ready: asyncio.Future[AgentDelegation] = asyncio.get_running_loop().create_future()
         background = self._background_delegate(parent, role, task, depth=depth, ready=ready)
-        self._track_background(background)
+        self._track_background(background, task.run_id)
         return await ready
 
     async def send_message(
@@ -344,11 +401,13 @@ class AgentDispatcher:
             name=f"secmind-delegation-{parent.instance_id}-{task.task_id}",
         )
 
-    def _track_background(self, task: asyncio.Task[AgentResult]) -> None:
+    def _track_background(self, task: asyncio.Task[AgentResult], run_id: str) -> None:
         self._background_tasks.add(task)
+        self._background_task_runs[task] = run_id
 
         def completed(value: asyncio.Task[AgentResult]) -> None:
             self._background_tasks.discard(value)
+            self._background_task_runs.pop(value, None)
             try:
                 value.result()
             except asyncio.CancelledError:
@@ -378,9 +437,25 @@ class AgentDispatcher:
             metadata={"delegation_depth": depth},
         )
         async with self._lock:
-            self._instances[instance.instance_id] = instance
-            self._inboxes[instance.instance_id] = asyncio.Queue()
-            self._completion_events[instance.instance_id] = asyncio.Event()
+            control = self._run_controls.get(task.run_id)
+            agent_count = sum(
+                1 for item in self._instances.values() if item.run_id == task.run_id
+            )
+            agent_limit_reached = control is not None and agent_count >= control.max_agents
+            if not agent_limit_reached:
+                self._instances[instance.instance_id] = instance
+                self._inboxes[instance.instance_id] = asyncio.Queue()
+                self._completion_events[instance.instance_id] = asyncio.Event()
+        if agent_limit_reached:
+            message = f"Run Agent limit reached ({control.max_agents})"
+            if ready is not None and not ready.done():
+                ready.set_exception(RuntimeError(message))
+            return await self._run_control_failure(
+                task,
+                role,
+                error_code="AGENT_COUNT_LIMIT",
+                message=message,
+            )
         await self._publish(
             RuntimeEventType.AGENT_CREATED,
             instance.model_dump(mode="json"),
@@ -462,6 +537,18 @@ class AgentDispatcher:
                 tool_id=tool_id,
                 arguments=arguments,
             )
+            control = self._run_controls.get(task.run_id)
+            if control is not None and datetime.now(UTC) >= control.tool_grace_deadline_at:
+                return UnifiedToolResult(
+                    invocation_id=invocation.invocation_id,
+                    tool_id=tool_id,
+                    status=ToolExecutionStatus.FAILED,
+                    error_code="AGENT_TOOL_GRACE_DEADLINE",
+                    error_message=(
+                        "The tool-call grace deadline was reached; complete using existing "
+                        "observations and evidence"
+                    ),
+                )
             if self.tool_gateway is None:
                 return UnifiedToolResult(
                     invocation_id=invocation.invocation_id,
@@ -640,6 +727,18 @@ class AgentDispatcher:
         depth: int,
         ready: asyncio.Future[AgentDelegation] | None = None,
     ) -> AgentResult:
+        control = self._run_controls.get(task.run_id)
+        if control is not None and datetime.now(UTC) >= control.soft_deadline_at:
+            return await self._run_control_failure(
+                task,
+                role,
+                error_code="AGENT_SOFT_DEADLINE",
+                message=(
+                    "The collaboration soft deadline was reached; do not delegate again and "
+                    "complete using the observations and evidence already available"
+                ),
+                parent=parent,
+            )
         delegation = AgentDelegation(
             run_id=task.run_id,
             flow_id=task.flow_id,
@@ -701,6 +800,41 @@ class AgentDispatcher:
             role,
         )
         return result
+
+    async def _run_control_failure(
+        self,
+        task: AgentTask,
+        role: AgentRole,
+        *,
+        error_code: str,
+        message: str,
+        parent: AgentInstance | None = None,
+    ) -> AgentResult:
+        await self._publish(
+            RuntimeEventType.BUDGET_EXHAUSTED,
+            {
+                "run_id": task.run_id,
+                "flow_id": task.flow_id,
+                "task_id": task.task_id,
+                "budget": "agent_collaboration",
+                "error_code": error_code,
+                "message": message,
+            },
+            parent.role if parent is not None else role,
+            context=(
+                self._event_context(parent, correlation_id=str(uuid4()))
+                if parent is not None
+                else EventContext(flow_id=task.flow_id, task_id=task.task_id)
+            ),
+        )
+        return AgentResult(
+            agent_instance_id=str(uuid4()),
+            task_id=task.task_id,
+            status=AgentStatus.FAILED,
+            summary=message,
+            error_code=error_code,
+            error_message=message,
+        )
 
     async def _message(self, message: AgentMessage, actor: AgentRole) -> None:
         async with self._lock:

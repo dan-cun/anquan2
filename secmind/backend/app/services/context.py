@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -320,26 +321,40 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
     async def run_native_collaboration(state: Any, review_round: int) -> dict[str, Any]:
         role = AgentRole.REFLECTOR if review_round == 2 else AgentRole.ASSISTANT
         workspace_refs = workspace_resolver.context_refs(state.run_id)
-        _, result = await collaboration.submit(
-            flow_id=state.flow_id or state.run_id,
-            run_id=state.run_id,
-            task_id=state.task_id,
-            objective=state.task.objective,
-            context_refs=workspace_refs,
-            constraints=state.task.constraints,
-            expected_outputs=state.task.expected_outputs,
-            metadata={
-                "review_round": review_round,
-                "workspace_ref": workspace_refs[0],
-                "allowed_tool_ids": (
-                    state.capability_plan.allowed_tool_ids
-                    if state.capability_plan is not None
-                    else []
-                ),
-            },
-            role=role,
+        agent_dispatcher.configure_run(
+            state.run_id,
+            max_agents=state.budget.max_agents,
+            soft_deadline_at=state.soft_deadline_at,
+            tool_grace_deadline_at=state.tool_grace_deadline_at,
+            hard_deadline_at=state.hard_deadline_at,
         )
-        return collaboration.collect_run_products(state.run_id, result)
+        try:
+            _, result = await collaboration.submit(
+                flow_id=state.flow_id or state.run_id,
+                run_id=state.run_id,
+                task_id=state.task_id,
+                objective=state.task.objective,
+                context_refs=workspace_refs,
+                constraints=state.task.constraints,
+                expected_outputs=state.task.expected_outputs,
+                metadata={
+                    "review_round": review_round,
+                    "workspace_ref": workspace_refs[0],
+                    "allowed_tool_ids": (
+                        state.capability_plan.allowed_tool_ids
+                        if state.capability_plan is not None
+                        else []
+                    ),
+                },
+                role=role,
+            )
+            return collaboration.collect_run_products(state.run_id, result)
+        except asyncio.CancelledError:
+            await agent_dispatcher.cancel_run(
+                state.run_id,
+                reason="Runtime hard deadline reached",
+            )
+            raise
 
     runtime.set_collaboration_runner(run_native_collaboration)
 
@@ -350,6 +365,7 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
             result=report,
         )
         run_id = str(report["run_id"])
+        agent_dispatcher.clear_run_control(run_id)
         known_artifacts = {item.artifact_id for item in repositories.results.list_artifacts(run_id)}
         known_evidence = {item.evidence_id for item in repositories.results.list_evidence(run_id)}
         for item in report.get("evidence", []):

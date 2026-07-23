@@ -243,6 +243,12 @@ class CompletionMode(StrEnum):
     FINAL_ANSWER = "final_answer"
 
 
+class TaskComplexity(StrEnum):
+    SIMPLE = "simple"
+    STANDARD = "standard"
+    COMPLEX = "complex"
+
+
 class TaskContract(BaseModel):
     """Deterministic, auditable completion contract derived from public task metadata."""
 
@@ -296,6 +302,7 @@ class TaskRequest(BaseModel):
     completion_mode: CompletionMode | None = None
     evaluator: str | None = Field(default=None, min_length=1, max_length=200)
     required_evidence: list[str] = Field(default_factory=list)
+    complexity_profile: TaskComplexity | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     autonomy_policy: Literal["graded", "approval_all", "automatic"] = "graded"
 
@@ -421,9 +428,13 @@ class PlanResult(BaseModel):
 
 
 class BudgetState(BaseModel):
+    complexity_profile: TaskComplexity = TaskComplexity.STANDARD
     max_steps: int = 12
     max_tool_calls: int = 12
     max_model_calls: int = 20
+    max_agents: int = 12
+    soft_deadline_seconds: int = 210
+    tool_grace_deadline_seconds: int = 270
     max_runtime_seconds: int = 600
     max_single_prompt_tokens: int = 32_000
     max_total_prompt_tokens: int = 100_000
@@ -650,6 +661,11 @@ class AgentState(BaseModel):
     verification_passed: bool | None = None
     state_revision: int = Field(default=0, ge=0)
     budget: BudgetState = Field(default_factory=BudgetState)
+    soft_deadline_at: datetime | None = None
+    tool_grace_deadline_at: datetime | None = None
+    hard_deadline_at: datetime | None = None
+    soft_deadline_reached: bool = False
+    hard_deadline_reached: bool = False
     report: AgentReport | None = None
     last_error: str | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -725,6 +741,9 @@ class RunSummary(BaseModel):
     review_converged: bool = False
     completion_gate_reason: str | None = None
     completion_gate_checks: dict[str, bool] = Field(default_factory=dict)
+    complexity_profile: TaskComplexity = TaskComplexity.STANDARD
+    soft_deadline_at: datetime | None = None
+    hard_deadline_at: datetime | None = None
     state_revision: int = 0
     pending_approval: ApprovalRequest | None = None
     last_error: str | None = None

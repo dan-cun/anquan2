@@ -51,6 +51,24 @@
       "max_run_prompt_tokens": 100000,
       "estimator": "ceil(message_and_schema_chars/4)"
     },
+    "runtime_profiles": {
+      "simple": {
+        "hard_deadline_seconds": 120,
+        "max_agents": 6
+      },
+      "standard": {
+        "hard_deadline_seconds": 300,
+        "max_agents": 12
+      },
+      "complex": {
+        "hard_deadline_seconds": 600,
+        "max_agents": 20
+      },
+      "soft_deadline_ratio": 0.7,
+      "tool_grace_deadline_ratio": 0.9,
+      "explicit_profile_precedence": true,
+      "hard_deadline_outcome": "partial/inconclusive"
+    },
     "stage_thinking_defaults": {
       "universal_primary": false,
       "plan": false,

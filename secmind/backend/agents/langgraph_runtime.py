@@ -97,7 +97,11 @@ class LangGraphRuntime:
             self._route,
             {"collaborate": "collaborate", "report": "report"},
         )
-        builder.add_edge("collaborate", "retrieve_context")
+        builder.add_conditional_edges(
+            "collaborate",
+            self._route,
+            {"retrieve_context": "retrieve_context", "report": "report"},
+        )
         builder.add_edge("retrieve_context", "plan")
         builder.add_edge("plan", "validate_plan")
         builder.add_conditional_edges(
@@ -266,7 +270,9 @@ class LangGraphRuntime:
         return self._update(state, route)
 
     async def _collaborate(self, value: RuntimeGraphState) -> RuntimeGraphState:
-        return self._update(await self.runtime.node_collaborate(self._state(value)))
+        state = await self.runtime.node_collaborate(self._state(value))
+        route = "report" if state.hard_deadline_reached else "retrieve_context"
+        return self._update(state, route)
 
     async def _retrieve_context(self, value: RuntimeGraphState) -> RuntimeGraphState:
         return self._update(await self.runtime.node_retrieve_context(self._state(value)))

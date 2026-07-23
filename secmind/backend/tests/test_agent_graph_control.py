@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -74,6 +75,20 @@ class ParentAgent(NativeAgent):
             task_id=context.task.task_id,
             status=AgentStatus.COMPLETED,
             summary=f"Child ended as {child.status.value}",
+        )
+
+
+class BudgetParentAgent(NativeAgent):
+    async def run(self, context: AgentRunContext) -> AgentResult:
+        child = await context.delegate(
+            AgentRole.PENTESTER,
+            objective="bounded delegated task",
+        )
+        return AgentResult(
+            agent_instance_id=context.instance.instance_id,
+            task_id=context.task.task_id,
+            status=AgentStatus.COMPLETED,
+            summary=child.error_code or child.status.value,
         )
 
 
@@ -191,6 +206,70 @@ async def test_stopping_child_does_not_cancel_parent_agent() -> None:
     assert child_result is not None and child_result.status == AgentStatus.CANCELLED
     assert parent_result is not None and parent_result.status == AgentStatus.COMPLETED
     assert parent_result.summary == "Child ended as cancelled"
+
+
+@pytest.mark.asyncio
+async def test_soft_deadline_blocks_new_delegation_without_creating_child() -> None:
+    registry = NativeAgentRegistry()
+    registry.register(descriptor(AgentRole.PRIMARY_AGENT), BudgetParentAgent)
+    registry.register(descriptor(AgentRole.PENTESTER), WaitingAgent)
+    events = EventRecorder()
+    dispatcher = AgentDispatcher(registry=registry, publisher=events.publish)
+    now = datetime.now(UTC)
+    dispatcher.configure_run(
+        "run-soft-deadline",
+        max_agents=6,
+        soft_deadline_at=now - timedelta(seconds=1),
+        tool_grace_deadline_at=now,
+        hard_deadline_at=now + timedelta(seconds=30),
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.PRIMARY_AGENT,
+        AgentTask(
+            run_id="run-soft-deadline",
+            flow_id="flow-soft-deadline",
+            objective="complete with existing evidence",
+        ),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert "AGENT_SOFT_DEADLINE" in result.summary
+    assert len(dispatcher.instances("run-soft-deadline")) == 1
+    assert any(
+        event[0] == "budget.exhausted"
+        and event[1]["error_code"] == "AGENT_SOFT_DEADLINE"
+        for event in events.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_count_limit_keeps_collaboration_bounded() -> None:
+    registry = NativeAgentRegistry()
+    registry.register(descriptor(AgentRole.PRIMARY_AGENT), BudgetParentAgent)
+    registry.register(descriptor(AgentRole.PENTESTER), WaitingAgent)
+    dispatcher = AgentDispatcher(registry=registry)
+    now = datetime.now(UTC)
+    dispatcher.configure_run(
+        "run-agent-limit",
+        max_agents=1,
+        soft_deadline_at=now + timedelta(seconds=10),
+        tool_grace_deadline_at=now + timedelta(seconds=20),
+        hard_deadline_at=now + timedelta(seconds=30),
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.PRIMARY_AGENT,
+        AgentTask(
+            run_id="run-agent-limit",
+            flow_id="flow-agent-limit",
+            objective="complete with one agent",
+        ),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert "AGENT_COUNT_LIMIT" in result.summary
+    assert len(dispatcher.instances("run-agent-limit")) == 1
 
 
 @pytest.mark.asyncio

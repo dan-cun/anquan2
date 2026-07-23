@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from app.schemas.runtime import (
     RuntimeToolContext,
     RuntimeToolResult,
     Scenario,
+    TaskComplexity,
     TaskRequest,
     ToolManifest,
     ToolStatus,
@@ -462,6 +465,62 @@ async def test_prompt_budget_blocks_oversized_model_request(tmp_path: Path) -> N
     assert state.budget.model_calls_used == 0
     assert state.budget.max_prompt_tokens_seen > 1
     assert any(item.decision == "model_plan_fallback" for item in state.decisions)
+
+
+def test_runtime_profile_is_explicit_or_deterministically_classified(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    explicit = runtime.new_state(
+        TaskRequest(objective="small task", complexity_profile=TaskComplexity.SIMPLE),
+        "explicit-profile-run",
+    )
+    assert explicit.budget.complexity_profile == TaskComplexity.SIMPLE
+    assert explicit.budget.max_agents == 6
+    assert explicit.budget.max_runtime_seconds == 120
+
+    large = runtime.new_state(TaskRequest(objective="audit repository"), "large-profile-run")
+    large.input_artifacts = [
+        InputArtifact(
+            original_name=f"file-{index}.py",
+            relative_path=f"src/file-{index}.py",
+            sha256=f"{index:064x}",
+            size_bytes=100,
+            media_type="text/x-python",
+        )
+        for index in range(332)
+    ]
+    large.capability_plan = CapabilityPlan(
+        task_kind="code_audit",
+        status=CapabilityStatus.READY,
+        allowed_tool_ids=["native:bandit_python_audit"],
+    )
+    assert runtime._classify_complexity(large) == TaskComplexity.COMPLEX
+
+
+@pytest.mark.asyncio
+async def test_hard_collaboration_deadline_persists_inconclusive_checkpoint(
+    tmp_path: Path,
+) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(TaskRequest(objective="long task"), "deadline-run")
+    now = datetime.now(UTC)
+    state.soft_deadline_at = now - timedelta(seconds=1)
+    state.tool_grace_deadline_at = now + timedelta(milliseconds=10)
+    state.hard_deadline_at = now + timedelta(milliseconds=50)
+
+    async def never_finishes(current: Any, review_round: int) -> dict[str, Any]:
+        del current, review_round
+        await asyncio.sleep(10)
+        return {}
+
+    runtime.set_collaboration_runner(never_finishes)
+    updated = await runtime.node_collaborate(state)
+
+    assert updated.status == RunStatus.PARTIAL
+    assert updated.hard_deadline_reached is True
+    assert updated.collaboration_completed is True
+    assert updated.receipts[-1].status == UnitOutcomeStatus.INCONCLUSIVE
+    assert updated.receipts[-1].error_type == "CollaborationTimeout"
+    assert runtime.state("deadline-run").hard_deadline_reached is True
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -40,6 +40,7 @@ from app.schemas.runtime import (
     RuntimeToolContext,
     RuntimeToolResult,
     Scenario,
+    TaskComplexity,
     TaskContract,
     TaskRequest,
     ToolStatus,
@@ -285,6 +286,9 @@ class RuntimeRunService:
             review_converged=state.review_converged,
             completion_gate_reason=state.completion_gate_reason,
             completion_gate_checks=state.completion_gate_checks,
+            complexity_profile=state.budget.complexity_profile,
+            soft_deadline_at=state.soft_deadline_at,
+            hard_deadline_at=state.hard_deadline_at,
             state_revision=state.state_revision,
             pending_approval=state.pending_approval,
             last_error=state.last_error,
@@ -321,7 +325,8 @@ class RuntimeRunService:
             },
             deep=True,
         )
-        return AgentState(
+        profile = self._explicit_complexity_profile(task) or TaskComplexity.STANDARD
+        state = AgentState(
             run_id=run_id,
             flow_id=flow_id or run_id,
             task_id=task_id,
@@ -330,6 +335,7 @@ class RuntimeRunService:
             completion_mode=task_contract.completion_mode,
             status=RunStatus.PENDING,
             budget=BudgetState(
+                complexity_profile=profile,
                 max_steps=self.settings.runtime_max_steps,
                 max_tool_calls=self.settings.runtime_max_tool_calls,
                 max_model_calls=self.settings.runtime_max_model_calls,
@@ -338,6 +344,122 @@ class RuntimeRunService:
                 max_total_prompt_tokens=self.settings.llm_max_run_prompt_tokens,
             ),
         )
+        self._apply_runtime_profile(state, profile)
+        return state
+
+    @staticmethod
+    def _explicit_complexity_profile(task: TaskRequest) -> TaskComplexity | None:
+        if task.complexity_profile is not None:
+            return task.complexity_profile
+        raw = task.metadata.get("complexity_profile", task.metadata.get("runtime_profile"))
+        if raw is None:
+            return None
+        try:
+            return TaskComplexity(str(raw).strip().lower())
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _classify_complexity(state: AgentState) -> TaskComplexity:
+        artifact_count = len(state.input_artifacts)
+        total_size = sum(item.size_bytes for item in state.input_artifacts)
+        tool_count = (
+            len(state.capability_plan.allowed_tool_ids)
+            if state.capability_plan is not None
+            else 0
+        )
+        contract = state.task_contract or resolve_task_contract(state.task)
+
+        if artifact_count > 100 or total_size > 20 * 1024 * 1024:
+            return TaskComplexity.COMPLEX
+
+        score = 0
+        if artifact_count > 20 or total_size > 2 * 1024 * 1024:
+            score += 1
+        if tool_count > 24:
+            score += 2
+        elif tool_count > 8:
+            score += 1
+        if contract.completion_mode == CompletionMode.FINAL_ANSWER:
+            score += 1
+        if len(contract.required_evidence) >= 3:
+            score += 1
+        if state.capability_plan is not None and state.capability_plan.dynamic_target:
+            score += 1
+
+        if score >= 3:
+            return TaskComplexity.COMPLEX
+        if score >= 1:
+            return TaskComplexity.STANDARD
+        return TaskComplexity.SIMPLE
+
+    def _apply_runtime_profile(
+        self,
+        state: AgentState,
+        profile: TaskComplexity,
+    ) -> None:
+        configured = {
+            TaskComplexity.SIMPLE: (
+                self.settings.runtime_simple_max_seconds,
+                self.settings.runtime_simple_max_agents,
+            ),
+            TaskComplexity.STANDARD: (
+                self.settings.runtime_standard_max_seconds,
+                self.settings.runtime_standard_max_agents,
+            ),
+            TaskComplexity.COMPLEX: (
+                self.settings.runtime_complex_max_seconds,
+                self.settings.runtime_complex_max_agents,
+            ),
+        }
+        configured_seconds, max_agents = configured[profile]
+        hard_seconds = min(configured_seconds, self.settings.runtime_max_runtime_seconds)
+        soft_seconds = max(
+            1,
+            int(hard_seconds * self.settings.runtime_soft_deadline_ratio),
+        )
+        tool_grace_seconds = max(
+            soft_seconds,
+            int(hard_seconds * self.settings.runtime_tool_grace_deadline_ratio),
+        )
+        state.budget.complexity_profile = profile
+        state.budget.max_agents = max_agents
+        state.budget.soft_deadline_seconds = soft_seconds
+        state.budget.tool_grace_deadline_seconds = tool_grace_seconds
+        state.budget.max_runtime_seconds = hard_seconds
+        state.soft_deadline_at = state.started_at + timedelta(seconds=soft_seconds)
+        state.tool_grace_deadline_at = state.started_at + timedelta(seconds=tool_grace_seconds)
+        state.hard_deadline_at = state.started_at + timedelta(seconds=hard_seconds)
+
+    @staticmethod
+    def _runtime_profile_payload(state: AgentState) -> dict[str, Any]:
+        return {
+            "complexity_profile": state.budget.complexity_profile.value,
+            "max_agents": state.budget.max_agents,
+            "soft_deadline_seconds": state.budget.soft_deadline_seconds,
+            "tool_grace_deadline_seconds": state.budget.tool_grace_deadline_seconds,
+            "hard_deadline_seconds": state.budget.max_runtime_seconds,
+            "soft_deadline_at": state.soft_deadline_at,
+            "tool_grace_deadline_at": state.tool_grace_deadline_at,
+            "hard_deadline_at": state.hard_deadline_at,
+        }
+
+    @staticmethod
+    def _soft_deadline_elapsed(state: AgentState) -> bool:
+        return state.soft_deadline_at is not None and datetime.now(UTC) >= state.soft_deadline_at
+
+    @staticmethod
+    def _tool_grace_deadline_elapsed(state: AgentState) -> bool:
+        return (
+            state.tool_grace_deadline_at is not None
+            and datetime.now(UTC) >= state.tool_grace_deadline_at
+        )
+
+    @staticmethod
+    def _remaining_hard_deadline_seconds(state: AgentState) -> float:
+        if state.hard_deadline_at is None:
+            return float(state.budget.max_runtime_seconds)
+        return max(0.0, (state.hard_deadline_at - datetime.now(UTC)).total_seconds())
 
     async def _start_state(self, state: AgentState) -> AgentState:
         try:
@@ -408,10 +530,17 @@ class RuntimeRunService:
             self._tool_catalog_provider(),
             state.completion_mode,
         )
+        profile = self._explicit_complexity_profile(state.task) or self._classify_complexity(
+            state
+        )
+        self._apply_runtime_profile(state, profile)
         return await self._checkpoint(
             state,
             "capability.routed",
-            state.capability_plan.model_dump(mode="json"),
+            {
+                **state.capability_plan.model_dump(mode="json"),
+                "runtime_profile": self._runtime_profile_payload(state),
+            },
         )
 
     async def node_universal_primary(self, state: AgentState) -> AgentState:
@@ -531,6 +660,8 @@ class RuntimeRunService:
     async def node_collaborate(self, state: AgentState) -> AgentState:
         if state.collaboration_completed:
             return state
+        if state.soft_deadline_at is None or state.hard_deadline_at is None:
+            self._apply_runtime_profile(state, state.budget.complexity_profile)
         if self._collaboration_runner is None:
             state.collaboration_completed = True
             return await self._checkpoint(
@@ -538,10 +669,17 @@ class RuntimeRunService:
                 "collaboration.skipped",
                 {"reason": "No native collaboration runner is configured"},
             )
+        remaining = self._remaining_hard_deadline_seconds(state)
+        if remaining <= 0:
+            return await self._record_collaboration_timeout(state)
         try:
-            bundle = await self._collaboration_runner(state, 1)
+            async with asyncio.timeout(remaining):
+                bundle = await self._collaboration_runner(state, 1)
             self._merge_collaboration_bundle(state, bundle, source="collaboration-round-1")
             state.collaboration_completed = True
+            state.soft_deadline_reached = self._soft_deadline_elapsed(state)
+        except TimeoutError:
+            return await self._record_collaboration_timeout(state)
         except Exception as error:
             state.last_error = f"Native collaboration failed: {type(error).__name__}: {error}"
             state.collaboration_completed = True
@@ -562,7 +700,34 @@ class RuntimeRunService:
                 "finding_count": len(state.findings),
                 "evidence_count": len(state.evidence),
                 "tool_call_count": len(state.tool_calls),
+                "runtime_profile": self._runtime_profile_payload(state),
                 "error": state.last_error,
+            },
+        )
+
+    async def _record_collaboration_timeout(self, state: AgentState) -> AgentState:
+        state.status = RunStatus.PARTIAL
+        state.collaboration_completed = True
+        state.soft_deadline_reached = True
+        state.hard_deadline_reached = True
+        state.last_error = (
+            f"Runtime hard deadline reached for {state.budget.complexity_profile.value} "
+            "task during native collaboration"
+        )
+        self._record_receipt(
+            state,
+            unit_type="agent",
+            unit_id="collaboration-round-1",
+            status=UnitOutcomeStatus.INCONCLUSIVE,
+            error_type="CollaborationTimeout",
+            error_message=state.last_error,
+        )
+        return await self._checkpoint(
+            state,
+            "collaboration.timed_out",
+            {
+                "error": state.last_error,
+                "runtime_profile": self._runtime_profile_payload(state),
             },
         )
 
@@ -687,13 +852,16 @@ class RuntimeRunService:
     async def node_select_step(self, state: AgentState) -> tuple[AgentState, str]:
         if state.current_step_index >= len(state.plan):
             return await self._checkpoint(state, "step.selection_complete", {}), "secondary_review"
-        elapsed = (datetime.now(UTC) - state.started_at).total_seconds()
-        if elapsed >= state.budget.max_runtime_seconds:
+        if self._remaining_hard_deadline_seconds(state) <= 0:
             state.status = RunStatus.PARTIAL
-            state.last_error = "Runtime budget exhausted"
+            state.soft_deadline_reached = True
+            state.hard_deadline_reached = True
+            state.last_error = "Runtime hard deadline reached"
             return await self._checkpoint(
-                state, "budget.exhausted", {"budget": "runtime"}
-            ), "secondary_review"
+                state,
+                "budget.exhausted",
+                {"budget": "runtime", "runtime_profile": self._runtime_profile_payload(state)},
+            ), "report"
         if state.budget.steps_used >= state.budget.max_steps:
             state.status = RunStatus.PARTIAL
             state.last_error = "Step budget exhausted"
@@ -866,6 +1034,15 @@ class RuntimeRunService:
             state.status = RunStatus.PARTIAL
             state.last_error = "Tool-call budget exhausted"
             return await self._checkpoint(state, "budget.exhausted", {"budget": "tools"})
+        if self._tool_grace_deadline_elapsed(state):
+            state.status = RunStatus.PARTIAL
+            state.soft_deadline_reached = True
+            state.last_error = "Tool-call grace deadline reached"
+            return await self._checkpoint(
+                state,
+                "budget.exhausted",
+                {"budget": "tool_grace", "runtime_profile": self._runtime_profile_payload(state)},
+            )
         state.budget.tool_calls_used += 1
         await self._event(
             state,
@@ -880,15 +1057,29 @@ class RuntimeRunService:
             },
         )
         try:
-            result = await self.broker.invoke(
-                tool_name,
-                step.inputs,
-                RuntimeToolContext(
-                    run_id=state.run_id,
-                    step_id=step.step_id,
-                    workspace=state.workspace,
-                    allowed_paths=[state.workspace],
-                ),
+            remaining = self._remaining_hard_deadline_seconds(state)
+            if remaining <= 0:
+                raise TimeoutError("Runtime hard deadline reached before tool execution")
+            async with asyncio.timeout(remaining):
+                result = await self.broker.invoke(
+                    tool_name,
+                    step.inputs,
+                    RuntimeToolContext(
+                        run_id=state.run_id,
+                        step_id=step.step_id,
+                        workspace=state.workspace,
+                        allowed_paths=[state.workspace],
+                    ),
+                )
+        except TimeoutError as error:
+            state.status = RunStatus.PARTIAL
+            state.soft_deadline_reached = True
+            state.hard_deadline_reached = True
+            result = RuntimeToolResult(
+                status=ToolStatus.TIMEOUT,
+                summary="The tool call was cancelled at the runtime hard deadline.",
+                error_code="RUNTIME_HARD_DEADLINE",
+                error_message=str(error) or "Runtime hard deadline reached",
             )
         except Exception as error:
             result = RuntimeToolResult(
@@ -1099,11 +1290,29 @@ class RuntimeRunService:
         review_error: str | None = None
         if self._collaboration_runner is not None:
             try:
-                bundle = await self._collaboration_runner(state, 2)
+                remaining = self._remaining_hard_deadline_seconds(state)
+                if remaining <= 0:
+                    raise TimeoutError("Runtime hard deadline reached before secondary review")
+                async with asyncio.timeout(remaining):
+                    bundle = await self._collaboration_runner(state, 2)
                 self._merge_collaboration_bundle(
                     state,
                     bundle,
                     source="secondary-review",
+                )
+            except TimeoutError as error:
+                state.status = RunStatus.PARTIAL
+                state.soft_deadline_reached = True
+                state.hard_deadline_reached = True
+                review_error = str(error) or "Runtime hard deadline reached during secondary review"
+                state.last_error = review_error
+                self._record_receipt(
+                    state,
+                    unit_type="agent",
+                    unit_id="secondary-review",
+                    status=UnitOutcomeStatus.INCONCLUSIVE,
+                    error_type="CollaborationTimeout",
+                    error_message=review_error,
                 )
             except Exception as error:
                 review_error = f"Secondary review failed: {type(error).__name__}: {error}"
@@ -1265,6 +1474,8 @@ class RuntimeRunService:
         successful = any(item.status == ToolStatus.SUCCESS for item in state.observations)
         if state.status in {RunStatus.DENIED, RunStatus.FAILED}:
             final_status = state.status
+        elif state.hard_deadline_reached:
+            final_status = RunStatus.PARTIAL
         elif state.verification_passed is True and state.review_converged:
             final_status = RunStatus.COMPLETED
         else:
@@ -1296,7 +1507,7 @@ class RuntimeRunService:
         )
         model_summary = (
             None
-            if capability_unavailable
+            if capability_unavailable or state.hard_deadline_reached
             else await self._call_model(
                 state,
                 stage="report",
@@ -1474,6 +1685,12 @@ class RuntimeRunService:
         response_model: type[BaseModel] | None = None,
         response_schema: dict[str, Any] | None = None,
     ) -> str | BaseModel | None:
+        if self._remaining_hard_deadline_seconds(state) <= 0:
+            state.status = RunStatus.PARTIAL
+            state.soft_deadline_reached = True
+            state.hard_deadline_reached = True
+            state.last_error = "Runtime hard deadline reached"
+            return None
         metadata = self.llm_provider.metadata()
         if not metadata.get("configured"):
             await self._record_model_fallback(state, stage, "provider_unconfigured")
