@@ -1162,3 +1162,86 @@ async def test_missing_workspace_chunk_has_independent_receipt(tmp_path: Path) -
     assert receipt.unit_type == "workspace_chunk"
     assert receipt.status == UnitOutcomeStatus.FAILED
     assert updated.primary_persisted is True
+
+
+@pytest.mark.asyncio
+async def test_primary_prompt_uses_bounded_workspace_manifest(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "bounded-primary-prompt")
+    state.capability_plan = CapabilityPlan(
+        task_kind="code_audit",
+        languages=["python"],
+        status=CapabilityStatus.READY,
+    )
+    state.input_artifacts = [
+        InputArtifact(
+            original_name=f"file-{index}.py",
+            relative_path=f"src/file-{index}.py",
+            sha256=f"{index:064x}"[-64:],
+            size_bytes=1_000,
+            media_type="text/x-python",
+        )
+        for index in range(332)
+    ]
+    captured: dict[str, Any] = {}
+
+    async def capture_model(_state: Any, **kwargs: Any) -> UniversalPrimaryResult:
+        captured.update(kwargs)
+        return UniversalPrimaryResult(
+            status=UnitOutcomeStatus.SUCCESS,
+            final_answer="unverified primary candidate",
+            executive_summary="bounded",
+        )
+
+    runtime._call_model = capture_model  # type: ignore[method-assign]
+    updated = await runtime.node_universal_primary(state)
+
+    manifest = captured["payload"]["workspace_manifest"]
+    assert manifest["file_count"] == 332
+    assert len(manifest["files"]) == 64
+    assert manifest["omitted_file_count"] == 268
+    assert all("content" not in item for item in manifest["files"])
+    assert len(json.dumps(captured["payload"], ensure_ascii=False)) < 32_000 * 4
+    assert updated.primary_result is not None
+    assert updated.final_answer is None
+
+
+@pytest.mark.asyncio
+async def test_report_prompt_projects_large_findings_without_raw_payload(tmp_path: Path) -> None:
+    runtime, _, _ = build_runtime(tmp_path)
+    state = runtime.new_state(audit_task(), "bounded-report-prompt")
+    state.status = RunStatus.PARTIAL
+    state.findings = [
+        Finding(
+            rule_id=f"RULE-{index}",
+            severity="HIGH" if index < 5 else "MEDIUM",
+            confidence="HIGH",
+            path=f"src/file-{index}.py",
+            line=index + 1,
+            title=f"Finding {index}",
+            description="A bounded finding description.",
+            remediation="Apply the recommended fix.",
+            evidence_ids=[f"evidence-{index}"],
+            raw={"large_code": "x" * 20_000},
+        )
+        for index in range(275)
+    ]
+    captured: dict[str, Any] = {}
+
+    async def capture_model(_state: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "bounded report"
+
+    runtime._call_model = capture_model  # type: ignore[method-assign]
+    updated = await runtime.node_report(state)
+
+    projection = captured["payload"]["findings_projection"]
+    assert projection["finding_summary"]["reported_count"] == 275
+    assert projection["finding_summary"]["included_count"] <= 20
+    assert projection["projection"]["source_sha256"]
+    assert all("raw" not in item for item in projection["findings"])
+    assert all("evidence_ids" in item for item in projection["findings"])
+    assert "large_code" not in json.dumps(captured["payload"], ensure_ascii=False)
+    assert len(json.dumps(captured["payload"], ensure_ascii=False)) < 32_000 * 4
+    assert updated.report is not None
+    assert updated.report.executive_summary == "bounded report"

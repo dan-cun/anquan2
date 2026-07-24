@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from agents.guardrail import GuardrailAction
+from agents.native import project_tool_data
 from app.core.config import Settings
 from app.schemas.runtime import (
     AgentReport,
@@ -52,7 +53,10 @@ from app.schemas.runtime import (
 from app.services.capabilities import CapabilityRouter
 from app.services.ingest import IngestError, InputIngestor
 from app.services.task_contracts import resolve_task_contract
-from app.services.workspace_context import relevant_workspace_chunks
+from app.services.workspace_context import (
+    relevant_workspace_chunks,
+    workspace_manifest_projection,
+)
 from knowledge.models import VerifierAttestation
 from ledger.runtime_store import RuntimeLedgerStore
 from llm.base import LLMMessage, ProviderHTTPError
@@ -619,9 +623,7 @@ class RuntimeRunService:
                 "target_scope": state.task.target_scope,
                 "completion_mode": state.completion_mode.value,
                 "capability_plan": plan.model_dump(mode="json"),
-                "workspace_manifest": [
-                    item.model_dump(mode="json") for item in state.input_artifacts
-                ],
+                "workspace_manifest": workspace_manifest_projection(state),
                 "relevant_workspace_chunks": chunks,
             },
             max_tokens=4_000,
@@ -645,8 +647,7 @@ class RuntimeRunService:
                 result = result.model_copy(update={"status": UnitOutcomeStatus.INCONCLUSIVE})
             receipt_status = result.status
             error_type = None
-            if result.final_answer:
-                state.final_answer = result.final_answer
+            # Primary answers remain candidates until an Agent supplies evidence-backed output.
         state.primary_result = result
         state.primary_persisted = True
         self._record_receipt(
@@ -1570,7 +1571,13 @@ class RuntimeRunService:
                 payload={
                     "objective": state.task.objective,
                     "status": final_status.value,
-                    "findings": [item.model_dump(mode="json") for item in state.findings],
+                    "findings_projection": project_tool_data(
+                        {
+                            "findings": [
+                                item.model_dump(mode="json") for item in state.findings
+                            ]
+                        }
+                    ),
                     "limitations": limitations,
                 },
                 max_tokens=400,
