@@ -82,6 +82,11 @@ SECURITY_PATH_HINTS = {
     "token",
 }
 
+AGENT_WORKSPACE_MANIFEST_FILES = 48
+AGENT_WORKSPACE_CHUNK_FILES = 6
+AGENT_WORKSPACE_CHARS_PER_FILE = 4_000
+AGENT_WORKSPACE_TOTAL_CHARS = 14_000
+
 
 def workspace_manifest_projection(
     state: AgentState,
@@ -178,6 +183,40 @@ def relevant_workspace_chunks(
         )
         remaining -= len(content)
     return chunks, failures
+
+
+def collaboration_workspace_context(state: AgentState) -> dict[str, object]:
+    """Build the bounded, evidence-addressable workspace view shared by native Agents."""
+
+    manifest = workspace_manifest_projection(
+        state,
+        max_files=AGENT_WORKSPACE_MANIFEST_FILES,
+    )
+    chunks, failures = relevant_workspace_chunks(
+        state,
+        max_files=AGENT_WORKSPACE_CHUNK_FILES,
+        max_chars_per_file=AGENT_WORKSPACE_CHARS_PER_FILE,
+        max_total_chars=AGENT_WORKSPACE_TOTAL_CHARS,
+    )
+    artifact_refs = sorted(
+        {
+            str(item["artifact_id"])
+            for item in chunks
+            if isinstance(item.get("artifact_id"), str)
+        }
+    )
+    return {
+        "version": "native-agent-workspace-v1",
+        "manifest": manifest,
+        "chunks": chunks,
+        "read_failures": failures[:8],
+        "allowed_artifact_refs": artifact_refs,
+        "usage_policy": (
+            "Use only supplied repository chunks or tool observations for security claims. "
+            "Cite artifact_refs and evidence_ids in every supported completion. Do not invent "
+            "example code, paths, line numbers, findings, exploits, or reproduction steps."
+        ),
+    }
 
 
 def _task_keywords(state: AgentState) -> set[str]:

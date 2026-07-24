@@ -17,6 +17,7 @@ from app.schemas.tools import (
 from app.services.capabilities import CapabilityRouter
 from app.services.collaboration import _deduplicated_findings
 from app.services.workspace_context import (
+    collaboration_workspace_context,
     relevant_workspace_chunks,
     workspace_manifest_projection,
 )
@@ -96,6 +97,37 @@ def test_workspace_projection_is_bounded_and_prioritizes_relevant_source(
     assert chunks[0]["path"] == "src/http_parser.py"
     assert sum(len(str(item["content"])) for item in chunks) <= 1_000
     assert failures == []
+
+
+def test_collaboration_workspace_context_is_bounded_for_large_repository(
+    tmp_path: Path,
+) -> None:
+    artifacts = []
+    for index in range(332):
+        relative_path = f"src/module_{index:03d}.py"
+        content = f"def audit_target_{index}():\n    return 'security-{index}'\n" * 120
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        artifacts.append(_artifact(relative_path, content))
+    state = AgentState(
+        run_id="run-large-collaboration",
+        workspace=str(tmp_path),
+        task=TaskRequest(objective="Audit security code and produce evidence-backed findings"),
+        input_artifacts=artifacts,
+    )
+
+    context = collaboration_workspace_context(state)
+    serialized = json.dumps(context, sort_keys=True, separators=(",", ":"))
+
+    assert context["manifest"]["file_count"] == 332
+    assert context["manifest"]["omitted_file_count"] == 284
+    assert 1 <= len(context["chunks"]) <= 6
+    assert len(serialized) < 32_000
+    assert context["allowed_artifact_refs"] == sorted(
+        item["artifact_id"] for item in context["chunks"]
+    )
+    assert all(item["content"] for item in context["chunks"])
 
 
 def test_code_audit_selects_a_subset_without_changing_the_88_tool_contract() -> None:

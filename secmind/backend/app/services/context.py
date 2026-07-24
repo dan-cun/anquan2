@@ -29,6 +29,7 @@ from app.services.execution import UnifiedExecutionService
 from app.services.long_term import LongTermTaskService, register_long_term_tools
 from app.services.runtime import RuntimeEventHub, RuntimeRunService
 from app.services.workspace import RuntimeWorkspaceResolver
+from app.services.workspace_context import collaboration_workspace_context
 from knowledge.service import QdrantKnowledgeService
 from knowledge.store import InMemoryKnowledgeStore
 from ledger.checkpoints import CheckpointerFactory
@@ -321,7 +322,24 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
 
     async def run_native_collaboration(state: Any, review_round: int) -> dict[str, Any]:
         role = AgentRole.REFLECTOR if review_round == 2 else AgentRole.ASSISTANT
-        workspace_refs = workspace_resolver.context_refs(state.run_id)
+        all_workspace_refs = workspace_resolver.context_refs(state.run_id)
+        workspace_context = collaboration_workspace_context(state)
+        root_ref, manifest_ref = all_workspace_refs[:2]
+        selected_artifact_ids = {
+            str(item.get("artifact_id") or "")
+            for item in workspace_context["chunks"]
+            if isinstance(item, dict)
+        }
+        workspace_refs = [root_ref, manifest_ref]
+        workspace_refs.extend(
+            reference
+            for artifact, reference in zip(
+                state.input_artifacts,
+                all_workspace_refs[2:],
+                strict=True,
+            )
+            if artifact.artifact_id in selected_artifact_ids
+        )
         tool_gateway.restore_run_circuit_state(
             state.run_id,
             opened_circuit_keys=state.opened_circuit_keys,
@@ -346,7 +364,9 @@ def build_services(settings: Settings, *, checkpointer: Any | None = None) -> Ap
                 expected_outputs=state.task.expected_outputs,
                 metadata={
                     "review_round": review_round,
-                    "workspace_ref": workspace_refs[0],
+                    "workspace_ref": root_ref,
+                    "workspace_context": workspace_context,
+                    "workspace_evidence_required": True,
                     "allowed_tool_ids": (
                         state.capability_plan.allowed_tool_ids
                         if state.capability_plan is not None

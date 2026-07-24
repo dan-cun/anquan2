@@ -35,6 +35,7 @@ from .tool_catalog import render_tool_catalog
 MAX_OBSERVATION_REFS = 64
 MAX_PROJECTED_FINDINGS = 20
 MAX_PROJECTED_DATA_CHARS = 12_000
+MAX_WORKSPACE_CONTEXT_CHARS = 32_000
 SEVERITY_RANK = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "UNKNOWN": 1}
 CONFIDENCE_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
 
@@ -215,6 +216,66 @@ def _bounded_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _workspace_context_message(task: AgentTask) -> LLMMessage | None:
+    workspace_context = task.metadata.get("workspace_context")
+    if not isinstance(workspace_context, dict):
+        return None
+    serialized = _canonical_json(workspace_context)
+    if len(serialized) > MAX_WORKSPACE_CONTEXT_CHARS:
+        serialized = _canonical_json(
+            {
+                "version": workspace_context.get("version"),
+                "manifest": workspace_context.get("manifest", {}),
+                "chunks": [],
+                "allowed_artifact_refs": workspace_context.get(
+                    "allowed_artifact_refs", []
+                ),
+                "truncated": True,
+                "source_sha256": _payload_sha256(workspace_context),
+                "usage_policy": workspace_context.get("usage_policy"),
+            }
+        )
+    return LLMMessage(
+        role="system",
+        content=(
+            "Bounded repository evidence context follows. It is inherited by delegated Agents. "
+            "Security conclusions, final answers, PoCs, and reproduction steps must cite an "
+            "allowed artifact_ref or evidence_id from a tool observation. Unsupported or invented "
+            "code must not be reported.\n" + serialized
+        ),
+        metadata={
+            "context_kind": "workspace_evidence",
+            "workspace_context_version": workspace_context.get("version"),
+        },
+    )
+
+
+def _completion_support_error(context: AgentRunContext, action: AgentAction) -> str | None:
+    if context.task.metadata.get("workspace_evidence_required") is not True:
+        return None
+    workspace_context = context.task.metadata.get("workspace_context")
+    if not isinstance(workspace_context, dict):
+        return "Workspace evidence context is missing"
+    allowed = {
+        str(item)
+        for item in workspace_context.get("allowed_artifact_refs", [])
+        if str(item)
+    }
+    cited_workspace = allowed.intersection(action.artifact_refs)
+    known_tool_artifacts = set(context.artifact_refs)
+    cited_tool_artifacts = known_tool_artifacts.intersection(action.artifact_refs)
+    known_evidence = set(context.evidence_ids)
+    cited_evidence = known_evidence.intersection(action.evidence_ids)
+    inherited_support = known_tool_artifacts or known_evidence
+    if cited_workspace or cited_tool_artifacts or cited_evidence or inherited_support:
+        return None
+    return (
+        "Completion rejected because it has no repository artifact_ref or tool evidence_id. "
+        "Inspect supplied chunks or invoke a tool, then complete with valid references; do not "
+        "invent example code."
+    )
 
 
 def _agent_result_observation(result: AgentResult, role: AgentRole) -> AgentObservation:
@@ -472,6 +533,9 @@ class ModelNativeAgent(NativeAgent):
             f"{prompt}\n\n{ACTION_PROTOCOL}",
             prompt_key=self.descriptor.prompt_key,
         )
+        workspace_message = _workspace_context_message(context.task)
+        if workspace_message is not None:
+            context.chain.messages.append(workspace_message)
         if context.long_term_context:
             context.chain.append(
                 "system",
@@ -635,6 +699,16 @@ class ModelNativeAgent(NativeAgent):
                 continue
 
             if action.action == AgentActionType.COMPLETE:
+                support_error = _completion_support_error(context, action)
+                if support_error is not None:
+                    context.chain.append_observation(
+                        _policy_observation(
+                            source_id=f"completion-support:{context.instance.instance_id}",
+                            summary=support_error,
+                            terminal=False,
+                        )
+                    )
+                    continue
                 return self._complete(
                     context,
                     action.summary,

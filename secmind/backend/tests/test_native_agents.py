@@ -626,3 +626,169 @@ async def test_reasoning_only_action_retries_without_thinking_before_fixer() -> 
     assert model.calls == [AgentRole.PRIMARY_AGENT, AgentRole.PRIMARY_AGENT]
     assert "thinking_enabled" not in model.request_kwargs[0]
     assert model.request_kwargs[1]["thinking_enabled"] is False
+
+
+def workspace_metadata() -> dict[str, Any]:
+    return {
+        "workspace_evidence_required": True,
+        "workspace_context": {
+            "version": "native-agent-workspace-v1",
+            "manifest": {
+                "file_count": 1,
+                "files": [
+                    {
+                        "artifact_id": "artifact-source",
+                        "path": "src/source.py",
+                        "sha256": "a" * 64,
+                    }
+                ],
+            },
+            "chunks": [
+                {
+                    "artifact_id": "artifact-source",
+                    "path": "src/source.py",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "content": "def safe():\n    return True\n",
+                }
+            ],
+            "allowed_artifact_refs": ["artifact-source"],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegated_agent_inherits_bounded_workspace_evidence() -> None:
+    model = ScriptedModel(
+        {
+            AgentRole.ASSISTANT: [
+                action("delegate", role="coder", objective="Inspect the supplied source"),
+                action("complete", summary="Audit completed"),
+            ],
+            AgentRole.CODER: [
+                action(
+                    "complete",
+                    summary="Source inspected; no unsupported claim was made",
+                    artifact_refs=["artifact-source"],
+                )
+            ],
+        }
+    )
+    dispatcher = AgentDispatcher(
+        registry=build_native_agent_registry(model=model, prompts=StaticPromptResolver())
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.ASSISTANT,
+        AgentTask(
+            run_id="run-workspace-evidence",
+            flow_id="flow-workspace-evidence",
+            objective="Audit the supplied repository",
+            context_refs=[
+                "workspace://run-workspace-evidence/",
+                "workspace://run-workspace-evidence/manifest",
+                "workspace://run-workspace-evidence/src/source.py",
+            ],
+            metadata=workspace_metadata(),
+        ),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert result.artifact_refs == ["artifact-source"]
+    coder_snapshot = model.message_snapshots[1]
+    workspace_message = next(
+        item
+        for item in coder_snapshot
+        if item.metadata.get("context_kind") == "workspace_evidence"
+    )
+    assert "def safe()" in workspace_message.content
+    assert "artifact-source" in workspace_message.content
+    coder_task = dispatcher.delegations("run-workspace-evidence")[0].task
+    assert coder_task.metadata == workspace_metadata()
+    assert len(coder_task.context_refs) == 3
+
+
+@pytest.mark.asyncio
+async def test_fabricated_completion_without_repository_evidence_is_rejected() -> None:
+    model = ScriptedModel(
+        {
+            AgentRole.PENTESTER: [
+                action(
+                    "complete",
+                    summary="Fabricated command injection in unrelated example code",
+                    data={
+                        "final_answer": "subprocess.call(user_input, shell=True)",
+                        "reproduction_steps": ["Run the invented snippet"],
+                    },
+                ),
+                action(
+                    "complete",
+                    summary="Still unsupported",
+                    data={"final_answer": "invented vulnerability"},
+                ),
+            ]
+        }
+    )
+    dispatcher = AgentDispatcher(
+        registry=build_native_agent_registry(
+            model=model,
+            prompts=StaticPromptResolver(),
+            max_iterations=2,
+        )
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.PENTESTER,
+        AgentTask(
+            run_id="run-fabricated",
+            flow_id="flow-fabricated",
+            objective="Validate a repository vulnerability",
+            metadata=workspace_metadata(),
+        ),
+    )
+
+    assert result.status == AgentStatus.FAILED
+    assert result.error_code == "AGENT_ITERATION_LIMIT"
+    assert result.artifact_refs == []
+    chain = await dispatcher.chain_store.for_instance(
+        dispatcher.instances("run-fabricated")[0].instance_id
+    )
+    support_observations = [
+        item
+        for item in chain.messages
+        if item.metadata.get("observation_source") == "policy"
+        and "Completion rejected" in item.content
+    ]
+    assert len(support_observations) == 2
+
+
+@pytest.mark.asyncio
+async def test_evidence_backed_workspace_completion_is_accepted() -> None:
+    model = ScriptedModel(
+        {
+            AgentRole.PENTESTER: [
+                action(
+                    "complete",
+                    summary="Repository source was inspected",
+                    data={"reproduction_steps": ["Inspect src/source.py lines 1-2"]},
+                    artifact_refs=["artifact-source"],
+                )
+            ]
+        }
+    )
+    dispatcher = AgentDispatcher(
+        registry=build_native_agent_registry(model=model, prompts=StaticPromptResolver())
+    )
+
+    result = await dispatcher.dispatch_root(
+        AgentRole.PENTESTER,
+        AgentTask(
+            run_id="run-supported",
+            flow_id="flow-supported",
+            objective="Validate a repository finding",
+            metadata=workspace_metadata(),
+        ),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert result.artifact_refs == ["artifact-source"]
